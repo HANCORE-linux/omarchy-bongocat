@@ -258,14 +258,15 @@ Panel {
       else root.toggle()
     }
 
-    CatImage {
+    OpticalGlyph {
       anchors.centerIn: parent
-      width: 32
-      height: 16
-      source: root.bongo ? root.bongo.idleSource
-        : Qt.resolvedUrl("assets/bongo-cat-both-up.png")
-      colorized: root.bongo ? root.bongo.catColorized : false
-      tint: root.bongo ? root.bongo.catTint : "white"
+      width: Style.space(22)
+      height: Style.space(22)
+      text: "󰄛"
+      fontFamily: root.fontFamily
+      fontSize: Style.font.icon
+      color: root.bongo && root.bongo.catColorized
+        ? root.bongo.catTint : root.foreground
       opacity: root.bongo && root.bongo.catActive ? 1 : 0.38
     }
   }

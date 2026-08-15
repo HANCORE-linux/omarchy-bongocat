@@ -15,8 +15,7 @@ Item {
   readonly property string moduleName: "hancore.bongocat"
   readonly property string home: Quickshell.env("HOME")
   readonly property string runtimeHome: Quickshell.env("XDG_RUNTIME_DIR")
-  readonly property string helperPath: runtimeHome + "/omarchy/bongocat/bongo-input"
-  readonly property string buildScript: localPath("helper/build-helper")
+  readonly property string helperPath: localPath("helper/bongo-input")
   readonly property string accessScript: localPath("helper/input-access")
   readonly property string pendingSettingsPath: runtimeHome
     + "/omarchy/bongocat/pending-settings.json"
@@ -37,6 +36,8 @@ Item {
   property int positionY: -1
   property int catWidth: 280
   readonly property int catHeight: Math.max(1, Math.round(catWidth * 360 / 864))
+  // All animation frames reserve 15 source pixels above the visible cat.
+  readonly property int frameTopInset: Math.max(0, Math.round(catHeight * 15 / 360))
   property int keypressDuration: 105
   property string keyboardName: ""
   property string monitorName: ""
@@ -56,9 +57,8 @@ Item {
 
   property bool leftDown: false
   property bool rightDown: false
-  property bool helperReady: false
-  property string buildError: ""
-  property string inputState: "building"
+  readonly property bool helperReady: true
+  property string inputState: "scanning"
   property int inputCount: 0
   property var devices: []
   property bool deviceScanRunning: false
@@ -438,6 +438,11 @@ Item {
       positionY < 0 ? fallback : positionY))
   }
 
+  function resolvedWindowY(screenObject) {
+    var resolved = resolvedY(screenObject)
+    return positionY < 0 ? resolved : resolved - frameTopInset
+  }
+
   function previewPosition(x, y, screenObject) {
     if (!screenObject || positionLocked) return
     positionX = Math.round(Math.max(0, Math.min(screenObject.width - catWidth, x)))
@@ -538,10 +543,6 @@ Item {
       accessBusy = false
       return
     }
-    if (!helperReady) {
-      inputState = buildProcess.running ? "building" : "error"
-      return
-    }
     if (inputProcess.running) {
       inputStopRequested = true
       inputProcess.running = false
@@ -605,10 +606,7 @@ Item {
       var name = String(devices[i].name || "")
       if (name === "" || seen[name]) continue
       seen[name] = true
-      options.push({
-        value: name,
-        label: name + ((devices[i].readable || accessInstalled) ? "" : " · no access")
-      })
+      options.push({ value: name, label: name })
     }
     if (keyboardName !== "" && !seen[keyboardName])
       options.push({ value: keyboardName, label: keyboardName + " · not found" })
@@ -628,14 +626,13 @@ Item {
   function inputStatusText() {
     if (!catActive) return "Disabled"
     if (presentationSuppressed) return "Hidden for screen privacy"
-    if (inputState === "building") return "Building input helper…"
     if (inputState === "authorizing") return "Waiting for input authorization…"
     if (inputState === "scanning") return "Scanning keyboards…"
     if (inputState === "ready")
       return inputCount + (inputCount === 1 ? " keyboard active" : " keyboards active")
     if (inputState === "permission") return "Input access required"
     if (inputState === "no-device") return "No keyboard found"
-    return buildError !== "" ? buildError : "Input helper unavailable"
+    return accessError !== "" ? accessError : "Input helper unavailable"
   }
 
   function checkInputAccess() {
@@ -666,8 +663,8 @@ Item {
   Component.onCompleted: {
     applySettings(defaults())
     loadPendingJournal(pendingSettingsFile.text())
-    buildProcess.command = [buildScript, helperPath]
-    buildProcess.running = true
+    scanDevices()
+    updateInputProcess()
     checkInputAccess()
   }
 
@@ -748,31 +745,6 @@ Item {
   }
 
   Process {
-    id: buildProcess
-    onStarted: {
-      root.buildError = ""
-      root.inputState = "building"
-    }
-    onExited: function(exitCode) {
-      root.helperReady = exitCode === 0
-      if (root.helperReady) {
-        root.scanDevices()
-        root.updateInputProcess()
-      } else {
-        root.inputState = "error"
-        if (root.buildError === "") root.buildError = "Could not build input helper"
-      }
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var message = String(text || "").trim()
-        if (message !== "") root.buildError = message.split("\n")[0]
-      }
-    }
-  }
-
-  Process {
     id: inputProcess
     stdout: SplitParser {
       onRead: function(line) { root.handleInputLine(line) }
@@ -847,7 +819,7 @@ Item {
         margins {
           left: root.positionX >= 0 ? root.resolvedX(screenScope.modelData) : 0
           right: root.positionX < 0 ? 36 : 0
-          top: root.positionY >= 0 ? root.resolvedY(screenScope.modelData) : 0
+          top: root.positionY >= 0 ? root.resolvedWindowY(screenScope.modelData) : 0
           bottom: root.positionY < 0 ? 54 : 0
         }
         mask: Region {}
@@ -881,7 +853,7 @@ Item {
         Item {
           id: editorCat
           x: root.resolvedX(screenScope.modelData)
-          y: root.resolvedY(screenScope.modelData)
+          y: root.resolvedWindowY(screenScope.modelData)
           width: root.catWidth
           height: root.catHeight
 
@@ -936,8 +908,8 @@ Item {
             onPositionChanged: function(mouse) {
               if (!(pressedButtons & Qt.LeftButton)) return
               var point = editorCat.mapToItem(editWindow.contentItem, mouse.x, mouse.y)
-              root.previewPosition(point.x - pressOffsetX, point.y - pressOffsetY,
-                screenScope.modelData)
+              root.previewPosition(point.x - pressOffsetX,
+                point.y - pressOffsetY + root.frameTopInset, screenScope.modelData)
             }
             onReleased: function(mouse) {
               if (mouse.button === Qt.LeftButton) root.commitPosition()

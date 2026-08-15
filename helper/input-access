@@ -14,8 +14,8 @@ shift 2
 helper_arguments=("$@")
 
 uid=$(id -u)
-runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$uid}
-expected_helper="$runtime_dir/omarchy/bongocat/bongo-input"
+helper_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+expected_helper="$helper_dir/bongo-input"
 resolved_helper=$(readlink -f -- "$helper" 2>/dev/null || true)
 if [[ $resolved_helper != "$expected_helper" || ! -f $resolved_helper \
     || ! -x $resolved_helper || $(stat -c '%u' -- "$resolved_helper") != "$uid" ]]; then
@@ -87,7 +87,8 @@ if [[ ! $path_count =~ ^[0-9]+$ ]] || (( path_count > 64 || path_count > $# )); 
   echo "Invalid keyboard device count." >&2
   exit 2
 fi
-expected_source="/run/user/$uid/omarchy/bongocat/bongo-input"
+home=$(getent passwd "$uid" | cut -d: -f6)
+expected_source="$home/.config/omarchy/plugins/hancore.bongocat/helper/bongo-input"
 if [[ $source_helper != "$expected_source" || ! -f $source_helper \
     || $(stat -c '%u' -- "$source_helper") != "$uid" \
     || ! $expected_hash =~ ^[0-9a-f]{64}$ ]]; then
@@ -125,7 +126,7 @@ temporary="$staging_dir/bongo-input"
 trap 'rm -rf -- "$staging_dir"' EXIT
 cp --reflink=never -- "$source_helper" "$temporary"
 chown root:root "$temporary"
-chmod 0511 "$temporary"
+chmod 0555 "$temporary"
 actual_hash=$(sha256sum -- "$temporary" | awk '{print $1}')
 if [[ $actual_hash != "$expected_hash" ]]; then
   echo "The input helper changed during authorization." >&2

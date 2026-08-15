@@ -4,12 +4,12 @@
 
 A lightweight native Quickshell plugin with no AUR package and no separate
 `wayland-bongocat` process. Quickshell renders the cat while the shipped local
-C helper emits only `L` or `R` paw events.
+Python helper emits only `L` or `R` paw events.
 
 ## Requirements
 
 - Omarchy Quattro with Quickshell
-- A C compiler available as `cc`
+- Python 3.10 or newer
 - Standard Omarchy packages and tools: Bash, jq, Polkit (`pkexec`), util-linux
   (`setpriv`), systemd (`udevadm`), GNU coreutils, GNU awk, GNU grep, and
   glibc/NSS (`getent`)
@@ -22,6 +22,21 @@ runtime network dependency.
 ```bash
 omarchy plugin add https://github.com/HANCORE-linux/omarchy-bongocat.git --enable
 ```
+
+## Update
+
+```bash
+omarchy plugin update hancore.bongocat
+```
+
+## Removal
+
+```bash
+omarchy plugin remove hancore.bongocat
+```
+
+Omarchy removes the bar entry and ends session input access automatically. No
+privileged cleanup is required.
 
 ## Controls
 
@@ -40,62 +55,27 @@ omarchy plugin add https://github.com/HANCORE-linux/omarchy-bongocat.git --enabl
 
 ## Keyboard access
 
-Wayland intentionally provides no API that lets a passive overlay observe all
-keyboard input. `Allow Input` therefore requests explicit Polkit authorization
-for the current Omarchy shell session.
+Wayland has no passive global-keyboard API, so `Allow Input` requests Polkit
+authorization for the current shell session. The launcher opens selected
+keyboards read-only and drops all root UID, GID, and group privileges before the
+Python helper starts. The helper never opens keyboard devices directly.
 
-The authorized launcher checks a root-owned runtime snapshot for changes made
-during authorization and opens only selected keyboard devices. It then uses
-`/usr/bin/setpriv` to discard the root UID, root GID, and all supplementary
-groups before the helper is executed. The snapshot is unlinked before
-execution. The unprivileged shipped helper then:
+`Revoke Input`, disabling or removing the plugin, and shell exit all close the
+descriptors. No udev rule, ACL, `input` group membership, service, or cleanup
+hook is installed. Connecting another keyboard requires `Rescan` and renewed
+authorization.
 
-- reads only the inherited, read-only keyboard descriptors;
-- binds its lifetime to `omarchy-shell`; and
-- emits only `L` or `R` paw events, never characters or keycodes.
+Raw input remains sensitive. The user-owned plugin cannot be authenticated by
+Polkit, so do not authorize it after a suspected user-session compromise. A
+stronger trust anchor would require a persistent root component, which this
+plugin intentionally avoids.
 
-No udev rule, device ACL, `input` group membership, system service, or cleanup
-hook is installed. `Revoke Input`, disabling or removing the plugin, a shell
-exit, or a shell crash ends the helper and closes its keyboard descriptors.
-Authorization must be granted again after a complete shell restart or login.
-A newly connected keyboard requires `Rescan` and renewed authorization because
-an unprivileged running helper cannot open additional event devices.
+## Local helper
 
-Raw input remains security-sensitive because the authorized helper necessarily
-sees keyboard events internally. Access is never enabled automatically.
-
-### Trust boundary
-
-The plugin and runtime helper are owned by the desktop user. Polkit confirms the
-authorization request, but it cannot authenticate those user-writable files. A
-process already running as the same user could replace them before authorization
-and receive the opened keyboard descriptors. Do not authorize input after a
-suspected user-session compromise. Preventing this would require a persistent,
-root-owned trust anchor, which this plugin intentionally does not install.
-
-## Local build
-
-The helper is compiled with the existing C compiler and stored for the current
-login session at:
-
-```text
-$XDG_RUNTIME_DIR/omarchy/bongocat/bongo-input
-```
-
-The runtime directory is cleared automatically at logout. No AUR package is
-installed.
-
-## Removal
-
-Use the normal Omarchy command:
-
-```bash
-omarchy plugin remove hancore.bongocat
-```
-
-Omarchy removes the bar entry from `shell.json` and deletes the plugin. The
-session-scoped input helper exits automatically, so no privileged cleanup step
-is required.
+The source-only Python helper runs directly from the plugin. Nothing is
+compiled, downloaded, or installed, and no prebuilt executable is bundled.
+Only the crash-recovery settings journal uses `$XDG_RUNTIME_DIR`; it is cleared
+automatically at logout.
 
 ## Credits
 

@@ -1,0 +1,314 @@
+#!/usr/bin/python3
+"""Emit privacy-minimized Bongo Cat paw events from Linux input descriptors."""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import errno
+import json
+import os
+import select
+import signal
+import stat
+import struct
+import sys
+import time
+from pathlib import Path
+
+MAX_DEVICES = 64
+RESCAN_SECONDS = 5.0
+EV_KEY = 1
+KEY_A = 30
+KEY_Z = 44
+KEY_ENTER = 28
+KEY_SPACE = 57
+INPUT_EVENT = struct.Struct("@llHHi")
+
+LEFT_KEYS = frozenset(
+    [1, 2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 19, 20, 29, 30, 31, 32, 33,
+     34, 41, 42, 44, 45, 46, 47, 48, 56, 58, 59, 60, 61, 62, 63, 125]
+)
+RIGHT_KEYS = frozenset(
+    [8, 9, 10, 11, 12, 13, 14, 21, 22, 23, 24, 25, 26, 27, 28, 35,
+     36, 37, 38, 39, 40, 49, 50, 51, 52, 53, 54, 55, 57, 64, 65, 66,
+     67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+     83, 86, 87, 88, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106,
+     107, 108, 109, 110, 111, 119, 126, 127]
+)
+POINTER_MARKERS = (
+    "mouse",
+    "touchpad",
+    "trackball",
+    "basilisk",
+    "deathadder",
+    "mx master",
+    "mx anywhere",
+    "magic trackpad",
+)
+
+RUNNING = True
+
+
+def stop(_signal_number: int, _frame: object) -> None:
+    global RUNNING
+    RUNNING = False
+
+
+def read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+
+
+def bitmap_has_key(bitmap: str, keycode: int) -> bool:
+    words = bitmap.split()
+    word_from_right, bit = divmod(keycode, 64)
+    if word_from_right >= len(words):
+        return False
+    try:
+        value = int(words[-1 - word_from_right], 16)
+    except ValueError:
+        return False
+    return bool(value & (1 << bit))
+
+
+def is_typing_keyboard(event: str) -> bool:
+    bitmap = read_text(Path("/sys/class/input") / event / "device/capabilities/key")
+    return bool(
+        bitmap
+        and bitmap_has_key(bitmap, KEY_A)
+        and bitmap_has_key(bitmap, KEY_Z)
+        and bitmap_has_key(bitmap, KEY_ENTER)
+        and bitmap_has_key(bitmap, KEY_SPACE)
+    )
+
+
+def discover_keyboards(selected_name: str = "") -> list[dict[str, object]]:
+    input_root = Path("/dev/input")
+    try:
+        events = sorted(input_root.glob("event*"), key=lambda path: path.name)
+    except OSError:
+        return []
+
+    devices: list[dict[str, object]] = []
+    for path in events:
+        if len(devices) >= MAX_DEVICES or not is_typing_keyboard(path.name):
+            continue
+        name = read_text(Path("/sys/class/input") / path.name / "device/name")
+        if not name or any(marker in name.lower() for marker in POINTER_MARKERS):
+            continue
+        if selected_name and name != selected_name:
+            continue
+        try:
+            readable = os.access(path, os.R_OK, effective_ids=True)
+        except (NotImplementedError, TypeError):
+            readable = os.access(path, os.R_OK)
+        devices.append({"path": str(path), "name": name, "readable": readable})
+    return devices
+
+
+def remove_legacy_runtime_helper() -> None:
+    runtime_home = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not runtime_home:
+        return
+    legacy = Path(runtime_home) / "omarchy/bongocat/bongo-input"
+    try:
+        metadata = legacy.lstat()
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid():
+            legacy.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def emit_status(state: str, count: int, previous: tuple[str, int] | None) -> tuple[str, int]:
+    current = (state, count)
+    if current != previous:
+        print(f"STATUS\t{state}\t{count}", flush=True)
+    return current
+
+
+def paw_for_key(keycode: int) -> str:
+    if keycode in LEFT_KEYS:
+        return "L"
+    if keycode in RIGHT_KEYS:
+        return "R"
+    return ""
+
+
+def harden_session() -> int:
+    if os.geteuid() == 0:
+        raise RuntimeError("Session input helper must not run as root.")
+
+    parent = os.getppid()
+    if parent <= 1:
+        raise RuntimeError("Could not bind the input helper to its parent process.")
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    pr_set_pdeathsig = 1
+    pr_set_dumpable = 4
+    pr_set_name = 15
+    pr_set_no_new_privs = 38
+
+    def checked(result: int) -> None:
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+
+    checked(libc.prctl(pr_set_pdeathsig, signal.SIGTERM, 0, 0, 0))
+    if os.getppid() != parent:
+        raise RuntimeError("The input helper parent exited during startup.")
+    checked(libc.prctl(pr_set_dumpable, 0, 0, 0, 0))
+    checked(libc.prctl(pr_set_no_new_privs, 1, 0, 0, 0))
+    checked(libc.prctl(pr_set_name, ctypes.c_char_p(b"bongo-input"), 0, 0, 0))
+    return parent
+
+
+def validate_inherited_fds(values: list[int]) -> list[int]:
+    valid: list[int] = []
+    for fd in values[:MAX_DEVICES]:
+        if fd < 3 or fd in valid:
+            continue
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISCHR(metadata.st_mode) or os.major(metadata.st_rdev) != 13:
+                continue
+            os.set_blocking(fd, False)
+        except OSError:
+            continue
+        valid.append(fd)
+    return valid
+
+
+def watch_session(inherited_fds: list[int], close_fd: int | None) -> int:
+    try:
+        parent = harden_session()
+    except (OSError, RuntimeError) as error:
+        print(f"Could not harden the session input helper: {error}", file=sys.stderr)
+        return 1
+
+    if close_fd is not None:
+        try:
+            os.close(close_fd)
+        except OSError:
+            pass
+
+    descriptors = validate_inherited_fds(inherited_fds)
+    poller = select.poll()
+    buffers: dict[int, bytes] = {}
+    for fd in descriptors:
+        poller.register(fd, select.POLLIN | select.POLLERR | select.POLLHUP)
+        buffers[fd] = b""
+
+    previous = emit_status("ready" if descriptors else "no-device", len(descriptors), None)
+    while RUNNING:
+        if os.getppid() != parent:
+            break
+        try:
+            events = poller.poll(1000)
+        except InterruptedError:
+            continue
+        for fd, flags in events:
+            if flags & (select.POLLERR | select.POLLHUP | select.POLLNVAL):
+                try:
+                    poller.unregister(fd)
+                except (KeyError, OSError):
+                    pass
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                buffers.pop(fd, None)
+                previous = emit_status(
+                    "ready" if buffers else "no-device", len(buffers), previous
+                )
+                continue
+            if not flags & select.POLLIN:
+                continue
+            try:
+                chunk = os.read(fd, INPUT_EVENT.size * 32)
+            except BlockingIOError:
+                continue
+            except OSError as error:
+                if error.errno in (errno.EAGAIN, errno.EINTR):
+                    continue
+                chunk = b""
+            if not chunk:
+                continue
+            data = buffers.get(fd, b"") + chunk
+            complete = len(data) - (len(data) % INPUT_EVENT.size)
+            buffers[fd] = data[complete:]
+            for offset in range(0, complete, INPUT_EVENT.size):
+                _sec, _usec, event_type, keycode, value = INPUT_EVENT.unpack_from(data, offset)
+                if event_type != EV_KEY or value != 1:
+                    continue
+                paw = paw_for_key(keycode)
+                if paw:
+                    print(paw, flush=True)
+
+    for fd in list(buffers):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return 0
+
+
+def watch_permissions(selected_name: str) -> int:
+    previous: tuple[str, int] | None = None
+    while RUNNING:
+        devices = discover_keyboards(selected_name)
+        previous = emit_status(
+            "permission" if devices else "no-device", len(devices), previous
+        )
+        deadline = time.monotonic() + RESCAN_SECONDS
+        while RUNNING and time.monotonic() < deadline:
+            time.sleep(0.1)
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Emit only L/R paw events; never print key codes or key text."
+    )
+    result.add_argument("--list", action="store_true")
+    result.add_argument("--watch", action="store_true")
+    result.add_argument("--name", default="")
+    result.add_argument("--session-fds", action="store_true", help=argparse.SUPPRESS)
+    result.add_argument("--fd", action="append", type=int, default=[], help=argparse.SUPPRESS)
+    result.add_argument("--close-fd", type=int, help=argparse.SUPPRESS)
+    result.add_argument("--version", action="store_true")
+    return result
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    if not arguments.session_fds:
+        remove_legacy_runtime_helper()
+    if arguments.version:
+        print("bongo-input 2.0.0")
+        return 0
+    if arguments.list and arguments.session_fds:
+        parser().error("--session-fds cannot be combined with --list")
+    if arguments.fd and not arguments.session_fds:
+        parser().error("--fd requires --session-fds")
+    if arguments.close_fd is not None and arguments.close_fd < 3:
+        parser().error("invalid helper descriptor")
+    if any(fd < 3 for fd in arguments.fd):
+        parser().error("invalid inherited input descriptor")
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    if arguments.list:
+        print(json.dumps(discover_keyboards(), separators=(",", ":")))
+        return 0
+    if arguments.session_fds:
+        return watch_session(arguments.fd, arguments.close_fd)
+    return watch_permissions(arguments.name)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
