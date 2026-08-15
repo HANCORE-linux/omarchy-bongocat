@@ -1,5 +1,7 @@
 # Bongo Cat for Omarchy Quattro
 
+![Bongo Cat](https://github.com/HANCORE-linux/omarchy-bongocat/blob/main/assets/bongo-cat-both-down.png?raw=true)
+
 A lightweight native Quickshell plugin with no AUR package and no separate
 `wayland-bongocat` process. Quickshell renders the cat while a small local C
 helper emits only `L` or `R` paw events.
