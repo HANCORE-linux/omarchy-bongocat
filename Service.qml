@@ -34,6 +34,8 @@ Item {
   property bool positionLocked: true
   property int positionX: -1
   property int positionY: -1
+  readonly property int minimumCatWidth: 60
+  readonly property int maximumCatWidth: 640
   property int catWidth: 280
   readonly property int catHeight: Math.max(1, Math.round(catWidth * 360 / 864))
   // All animation frames reserve 15 source pixels above the visible cat.
@@ -135,7 +137,7 @@ Item {
     positionLocked = boolValue(next.positionLocked, true)
     positionX = intValue(next.positionX, -1, -1, 16000)
     positionY = intValue(next.positionY, -1, -1, 16000)
-    catWidth = intValue(next.catWidth, 280, 120, 640)
+    catWidth = intValue(next.catWidth, 280, minimumCatWidth, maximumCatWidth)
     keypressDuration = intValue(next.keypressDuration, 105, 40, 500)
     keyboardName = String(next.keyboardName || "")
     monitorName = String(next.monitorName || "")
@@ -389,10 +391,12 @@ Item {
   function setCatActive(value) { patchSettings({ active: !!value }) }
   function setPositionLocked(value) { patchSettings({ positionLocked: !!value }) }
   function previewCatWidth(value) {
-    catWidth = intValue(value, catWidth, 120, 640)
+    catWidth = intValue(value, catWidth, minimumCatWidth, maximumCatWidth)
   }
   function setCatWidth(value) {
-    patchSettings({ catWidth: intValue(value, catWidth, 120, 640) })
+    patchSettings({
+      catWidth: intValue(value, catWidth, minimumCatWidth, maximumCatWidth)
+    })
   }
   function resizeCat(delta) { setCatWidth(catWidth + delta) }
   function setKeypressDuration(value) {

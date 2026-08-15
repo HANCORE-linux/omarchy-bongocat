@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "hancore.bongocat",
   "name": "Bongo Cat",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "HANCORE",
   "license": "MIT",
   "description": "A native Quickshell Bongo Cat with automatic keyboard detection, source-only session input access, and lockable drag positioning.",
@@ -64,7 +64,7 @@
         "key": "catWidth",
         "type": "integer",
         "label": "Cat width (pixels)",
-        "min": 120,
+        "min": 60,
         "max": 640,
         "step": 10,
         "defaultValue": 280

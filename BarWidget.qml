@@ -243,7 +243,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    fixedWidth: 36
+    fixedWidth: Style.bar.iconSlot
     labelVisible: false
     hasVisualContent: true
     active: root.bongo && root.bongo.catActive
@@ -260,11 +260,11 @@ Panel {
 
     OpticalGlyph {
       anchors.centerIn: parent
-      width: Style.space(22)
-      height: Style.space(22)
+      width: Style.space(24)
+      height: Style.space(24)
       text: "󰄛"
       fontFamily: root.fontFamily
-      fontSize: Style.font.icon
+      fontSize: Style.font.iconLarge
       color: root.bongo && root.bongo.catColorized
         ? root.bongo.catTint : root.foreground
       opacity: root.bongo && root.bongo.catActive ? 1 : 0.38
@@ -455,7 +455,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               bar: root.bar
               value: root.bongo ? root.bongo.catWidth : 280
-              minimum: 120
+              minimum: root.bongo ? root.bongo.minimumCatWidth : 60
               maximum: 640
               step: 20
               integer: true
@@ -493,7 +493,7 @@ Panel {
             id: sizePresetGroup
             anchors.horizontalCenter: parent.horizontalCenter
             options: [
-              { value: "180", label: "Small" },
+              { value: "60", label: "Small" },
               { value: "280", label: "Medium" },
               { value: "420", label: "Large" }
             ]

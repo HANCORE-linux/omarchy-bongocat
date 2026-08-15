@@ -48,7 +48,7 @@ privileged cleanup is required.
 - While unlocked, use the mouse wheel to resize it and right-click to lock it.
 - The lock prevents direct pointer dragging; panel position fields, arrows, and
   Reset remain available.
-- Set the width from 120 to 640 px.
+- Set the width from 60 to 640 px; 60 px fits the cat on the bar.
 - Choose `Default`, `Theme`, or a custom `#RRGGBB` color.
 - In the open panel, press `P` to lock or unlock, `T` to test, or use the arrow
   keys to move the cat by 10 px.
