@@ -1,61 +1,68 @@
-# Bongo Cat für Omarchy Quattro
+# Bongo Cat for Omarchy Quattro
 
-Lokales, leichtgewichtiges Quickshell-Plugin ohne AUR-Paket und ohne separaten
-`wayland-bongocat`-Prozess. Quickshell zeichnet die Katze; ein kleiner lokaler
-C-Helfer liest ausschließlich Tastendrücke und meldet nur `L` oder `R` für die
-beiden Pfoten.
+A lightweight native Quickshell plugin with no AUR package and no separate
+`wayland-bongocat` process. Quickshell renders the cat while a small local C
+helper emits only `L` or `R` paw events.
 
-## Bedienung
+## Controls
 
-- Linksklick auf das Bar-Icon: Einstellungen öffnen.
-- Rechtsklick auf das Bar-Icon: Bongo Cat ein-/ausschalten.
-- Mittelklick: Animation testen.
-- Oben rechts im Panel: Ein/Aus, Position sperren/entsperren und Test.
-- Entsperrte Katze ziehen; Mausrad ändert die Größe, Rechtsklick sperrt.
-- Größe: 120–640 px. Farbe: `Default`, `Theme` oder eigener `#RRGGBB`-Wert.
-- Tastatur: `P` sperrt/entsperrt, `T` testet, Pfeiltasten verschieben um 10 px.
+- Left-click the bar icon to open the settings panel.
+- Right-click the bar icon to enable or disable Bongo Cat.
+- Middle-click the bar icon to test the animation.
+- Use the compact header buttons for enable, position lock, and animation test.
+- Unlock and drag the cat to reposition it.
+- While unlocked, use the mouse wheel to resize it and right-click to lock it.
+- Set the width from 120 to 640 px.
+- Choose `Default`, `Theme`, or a custom `#RRGGBB` color.
+- In the open panel, press `P` to lock or unlock, `T` to test, or use the arrow
+  keys to move an unlocked cat by 10 px.
 
-## Tastaturzugriff
+## Keyboard access
 
-Wayland stellt absichtlich keine API bereit, mit der ein passives Overlay alle
-Tastendrücke beobachten kann. Deshalb ist einmalig eine Polkit-Freigabe nötig.
-Der Panel-Knopf `Allow Input` installiert diese Regel:
+Wayland intentionally provides no API that lets a passive overlay observe all
+keyboard input. One explicit Polkit authorization is therefore required. The
+`Allow Input` button installs this udev rule:
 
 ```udev
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
 ```
 
-Dadurch darf der jeweils aktive lokale Desktop-Benutzer Tastatur-Events lesen.
-Das ist enger als eine dauerhafte Mitgliedschaft in der Gruppe `input`, bedeutet
-aber ausdrücklich: **Alle Prozesse dieses aktiven Benutzerkontos könnten rohe
-Tastatureingaben lesen.** Der Zugriff kann im Panel jederzeit wieder entzogen
-werden, auch wenn Bongo Cat deaktiviert ist. Das blockiert neue Leser und
-startet den Bongo-Helfer ohne Zugriff neu. Fremde Prozesse, die das Gerät bereits
-geöffnet hatten, verlieren ihren offenen Dateideskriptor erst nach Abmeldung,
-Neustart oder erneutem Anstecken des Geräts.
+This grants keyboard-event access to the active local desktop user. It is more
+limited than permanent membership in the `input` group, but it still means that
+**every process running as the active user could read raw keyboard events**.
+Access can be removed with `Revoke Input`, even while Bongo Cat is disabled.
+This blocks new readers and restarts the Bongo Cat helper without access.
+Processes that already hold an open device descriptor retain it until logout,
+reboot, or device reconnection.
 
-Der Plugin-Helfer selbst protokolliert weder Zeichen noch Keycodes und gibt nur
-linke/rechte Pfotenereignisse an Quickshell weiter. Dennoch ist der Zugriff auf
-Eingabegeräte sicherheitsrelevant und wird nie automatisch freigeschaltet.
+The plugin helper itself does not log characters or keycodes. It sends only
+left-paw and right-paw events to Quickshell. Input-device access is still
+security-sensitive and is never enabled automatically.
 
-## Lokaler Build
+## Local build
 
-Der Helfer wird beim ersten Laden mit dem vorhandenen C-Compiler nach
-`~/.cache/omarchy/bongocat/bongo-input` gebaut. Es wird kein AUR-Paket
-installiert.
+On first load, the helper is compiled with the existing C compiler and stored
+at:
 
-## Vor dem Entfernen
+```text
+~/.cache/omarchy/bongocat/bongo-input
+```
 
-Zuerst im Panel `Revoke Input` wählen. Alternativ lokal ausführen:
+No AUR package is installed.
+
+## Before removal
+
+First select `Revoke Input` in the panel. Alternatively, run:
 
 ```bash
 ~/.config/omarchy/plugins/hancore.bongocat/helper/input-access remove
 rm -rf ~/.cache/omarchy/bongocat
 ```
 
-Erst danach den Pluginordner löschen.
+Then remove the plugin directory.
 
-## Herkunft
+## Credits
 
-Grafikframes und Pfotenbelegung stammen aus `saatvik333/wayland-bongocat`.
-Siehe `THIRD_PARTY.md` und `LICENSE.wayland-bongocat`.
+The animation frames and paw mapping are derived from
+`saatvik333/wayland-bongocat`. See `THIRD_PARTY.md` and
+`LICENSE.wayland-bongocat`.
