@@ -6,6 +6,17 @@ A lightweight native Quickshell plugin with no AUR package and no separate
 `wayland-bongocat` process. Quickshell renders the cat while the shipped local
 C helper emits only `L` or `R` paw events.
 
+## Requirements
+
+- Omarchy Quattro with Quickshell
+- A C compiler available as `cc`
+- Standard Omarchy packages and tools: Bash, jq, Polkit (`pkexec`), util-linux
+  (`setpriv`), systemd (`udevadm`), GNU coreutils, GNU awk, GNU grep, and
+  glibc/NSS (`getent`)
+
+These dependencies are normally included with Omarchy. The plugin has no AUR or
+runtime network dependency.
+
 ## Installation
 
 ```bash
