@@ -14,13 +14,23 @@ Item {
 
   readonly property string moduleName: "hancore.bongocat"
   readonly property string home: Quickshell.env("HOME")
-  readonly property string cacheHome: Quickshell.env("XDG_CACHE_HOME") !== ""
-    ? Quickshell.env("XDG_CACHE_HOME") : home + "/.cache"
-  readonly property string helperPath: cacheHome + "/omarchy/bongocat/bongo-input"
+  readonly property string runtimeHome: Quickshell.env("XDG_RUNTIME_DIR")
+  readonly property string helperPath: runtimeHome + "/omarchy/bongocat/bongo-input"
   readonly property string buildScript: localPath("helper/build-helper")
   readonly property string accessScript: localPath("helper/input-access")
+  readonly property string pendingSettingsPath: runtimeHome
+    + "/omarchy/bongocat/pending-settings.json"
 
   property var pluginSettings: ({})
+  property int panelSessionCount: 0
+  property bool settingsDirty: false
+  property var pendingSettingKeys: ({})
+  property var pendingRecoveryPatch: ({})
+  property bool pendingJournalLoaded: false
+  property bool persistVerificationPending: false
+  property var persistVerificationPatch: ({})
+  property int persistVerificationAttempts: 0
+  property int persistenceFailureCount: 0
   property bool catActive: true
   property bool positionLocked: true
   property int positionX: -1
@@ -32,6 +42,14 @@ Item {
   property string monitorName: ""
   property string colorMode: "default"
   property string customColor: "#f0abab"
+  readonly property var idleService: shell && typeof shell.serviceFor === "function"
+    ? shell.serviceFor("omarchy.idle") : null
+  readonly property var lockService: shell && typeof shell.serviceFor === "function"
+    ? shell.serviceFor("omarchy.lock") : null
+  readonly property bool presentationSuppressed:
+    (idleService && idleService.screensaverWindowCount > 0)
+    || (lockService && lockService.locked)
+  readonly property bool catVisible: catActive && !presentationSuppressed
   readonly property bool catColorized: colorMode !== "default"
   readonly property color catTint: colorMode === "theme"
     ? Color.accent : customColor
@@ -45,7 +63,8 @@ Item {
   property var devices: []
   property bool deviceScanRunning: false
   property bool accessBusy: false
-  property bool accessInstalled: false
+  property bool sessionAccessGranted: false
+  readonly property bool accessInstalled: sessionAccessGranted
   property string accessError: ""
   property bool inputStopRequested: false
   property int inputFailureCount: 0
@@ -129,9 +148,7 @@ Item {
       updateInputProcess()
   }
 
-  function settingsFromShell() {
-    if (!shell) return null
-    var config = shell.shellConfig
+  function settingsFromConfig(config) {
     if (!config || !config.bar || !config.bar.layout) return null
     var sections = ["left", "center", "right"]
     for (var s = 0; s < sections.length; ++s) {
@@ -151,17 +168,222 @@ Item {
     return null
   }
 
+  function settingsFromShell() {
+    return shell ? settingsFromConfig(shell.shellConfig) : null
+  }
+
+  function shellConfigFromDisk() {
+    if (!shell || String(shell.userConfigPath || "") === "") return null
+    shellConfigProbe.reload()
+    try {
+      return JSON.parse(String(shellConfigProbe.text()))
+    } catch (error) {
+      console.warn("Bongo Cat could not read the latest shell settings")
+      return null
+    }
+  }
+
+  function configWithSettings(config, settings) {
+    var nextConfig = JSON.parse(JSON.stringify(config))
+    var entry = settingsFromConfig(nextConfig)
+    if (!entry) return null
+    for (var oldKey in entry) {
+      if (oldKey !== "id") delete entry[oldKey]
+    }
+    entry.id = moduleName
+    for (var key in settings) {
+      if (key !== "id") entry[key] = settings[key]
+    }
+    return nextConfig
+  }
+
   function syncFromShell() {
+    if (panelSessionCount > 0 || settingsDirty || persistVerificationPending) return
     var found = settingsFromShell()
     if (found) applySettings(found)
   }
 
+  function beginPanelSession() {
+    panelSessionCount += 1
+  }
+
+  function endPanelSession() {
+    panelSessionCount = Math.max(0, panelSessionCount - 1)
+    if (panelSessionCount !== 0) return
+    if (settingsDirty) persistPendingSettings()
+    else syncFromShell()
+  }
+
+  function abandonPanelSession() {
+    panelSessionCount = Math.max(0, panelSessionCount - 1)
+    if (panelSessionCount === 0 && settingsDirty)
+      abandonedSessionTimer.restart()
+  }
+
+  function writePendingJournal() {
+    if (!settingsDirty) return
+    var values = ({})
+    for (var key in pendingSettingKeys) {
+      if (pendingSettingKeys[key]) values[key] = pluginSettings[key]
+    }
+    pendingSettingsFile.setText(JSON.stringify({ version: 1, settings: values }) + "\n")
+  }
+
+  function clearPendingJournal() {
+    pendingSettingsFile.setText("")
+  }
+
+  function verifyPersistedSettings(raw) {
+    if (!persistVerificationPending) return
+    var config = null
+    try {
+      config = JSON.parse(String(raw || ""))
+    } catch (error) {
+      return
+    }
+    var stored = settingsFromConfig(config)
+    if (!stored) return
+    var keys = Object.keys(persistVerificationPatch)
+    for (var i = 0; i < keys.length; ++i) {
+      var key = keys[i]
+      if (JSON.stringify(stored[key]) !== JSON.stringify(persistVerificationPatch[key]))
+        return
+    }
+
+    persistVerificationPending = false
+    persistVerificationPatch = ({})
+    persistVerificationAttempts = 0
+    persistenceFailureCount = 0
+    persistenceRetryTimer.interval = 1000
+    persistenceVerificationTimer.stop()
+    if (settingsDirty) {
+      writePendingJournal()
+    } else {
+      pendingSettingKeys = ({})
+      clearPendingJournal()
+      syncFromShell()
+    }
+  }
+
+  function retryUnverifiedPersistence() {
+    if (!persistVerificationPending) return
+    persistenceVerificationTimer.stop()
+    var keys = Object.keys(persistVerificationPatch)
+    for (var i = 0; i < keys.length; ++i)
+      pendingSettingKeys[keys[i]] = true
+    persistVerificationPending = false
+    persistVerificationPatch = ({})
+    persistVerificationAttempts = 0
+    settingsDirty = true
+    writePendingJournal()
+    persistenceFailureCount = Math.min(5, persistenceFailureCount + 1)
+    persistenceRetryTimer.interval = Math.min(30000,
+      1000 * Math.pow(2, persistenceFailureCount - 1))
+    persistenceRetryTimer.restart()
+  }
+
+  function loadPendingJournal(raw) {
+    if (pendingJournalLoaded) return
+    pendingJournalLoaded = true
+    var text = String(raw || "").trim()
+    if (text === "") return
+    try {
+      var parsed = JSON.parse(text)
+      if (parsed && parsed.version === 1 && parsed.settings
+          && typeof parsed.settings === "object") {
+        pendingRecoveryPatch = parsed.settings
+        recoverPendingJournal()
+      } else {
+        clearPendingJournal()
+      }
+    } catch (error) {
+      console.warn("Bongo Cat pending settings are invalid; discarding them")
+      clearPendingJournal()
+    }
+  }
+
+  function recoverPendingJournal() {
+    if (!shell || !pendingRecoveryPatch) return
+    var keys = Object.keys(pendingRecoveryPatch)
+    if (keys.length === 0) return
+    var shellSettings = settingsFromShell()
+    if (!shellSettings) return
+
+    var latest = mergedSettings(shellSettings)
+    var modified = ({})
+    for (var i = 0; i < keys.length; ++i) {
+      var key = keys[i]
+      if (!(key in defaults())) continue
+      latest[key] = pendingRecoveryPatch[key]
+      modified[key] = true
+    }
+
+    pendingRecoveryPatch = ({})
+    if (Object.keys(modified).length === 0) {
+      clearPendingJournal()
+      return
+    }
+    applySettings(latest)
+    pendingSettingKeys = modified
+    settingsDirty = true
+    persistPendingSettings()
+  }
+
+  function persistPendingSettings() {
+    if (!settingsDirty) return
+    writePendingJournal()
+    if (!shell || typeof shell.persistShellConfig !== "function") {
+      persistenceRetryTimer.restart()
+      return
+    }
+    var diskConfig = shellConfigFromDisk()
+    var diskSettings = settingsFromConfig(diskConfig)
+    if (!diskSettings) {
+      persistenceRetryTimer.restart()
+      return
+    }
+
+    var local = mergedSettings(pluginSettings)
+    var latest = mergedSettings(diskSettings)
+    var verification = ({})
+    for (var key in pendingSettingKeys) {
+      if (!pendingSettingKeys[key]) continue
+      latest[key] = local[key]
+      verification[key] = local[key]
+    }
+    var nextConfig = configWithSettings(diskConfig, latest)
+    if (!nextConfig) {
+      persistenceRetryTimer.restart()
+      return
+    }
+
+    applySettings(latest)
+    settingsDirty = false
+    persistVerificationPatch = verification
+    persistVerificationPending = true
+    persistVerificationAttempts = 0
+    try {
+      shell.persistShellConfig(nextConfig)
+      persistenceVerificationTimer.restart()
+    } catch (error) {
+      console.warn("Bongo Cat could not persist shell settings")
+      retryUnverifiedPersistence()
+    }
+  }
+
   function patchSettings(patch) {
     var next = mergedSettings(pluginSettings)
-    for (var key in patch) next[key] = patch[key]
+    var modified = ({})
+    for (var key in pendingSettingKeys) modified[key] = pendingSettingKeys[key]
+    for (var patchKey in patch) {
+      next[patchKey] = patch[patchKey]
+      modified[patchKey] = true
+    }
     applySettings(next)
-    if (shell && typeof shell.updateEntryInline === "function")
-      shell.updateEntryInline(moduleName, next)
+    pendingSettingKeys = modified
+    settingsDirty = true
+    if (panelSessionCount > 0) writePendingJournal()
+    else persistPendingSettings()
   }
 
   function setCatActive(value) { patchSettings({ active: !!value }) }
@@ -277,25 +499,34 @@ Item {
       inputState = fields.length > 1 ? fields[1] : "error"
       inputCount = fields.length > 2 ? Math.max(0, parseInt(fields[2], 10) || 0) : 0
       inputFailureCount = 0
+      accessBusy = false
+      if (sessionAccessGranted && inputState === "permission") {
+        sessionAccessGranted = false
+        accessError = "The authorized input helper could not open the keyboard"
+      }
     }
   }
 
   function inputCommand() {
-    var command = [helperPath, "--watch"]
-    if (keyboardName !== "") command.push("--name", keyboardName)
-    return command
+    var arguments = ["--watch"]
+    if (keyboardName !== "") arguments.push("--name", keyboardName)
+    if (sessionAccessGranted)
+      return [accessScript, "watch", helperPath].concat(arguments)
+    return [helperPath].concat(arguments)
   }
 
   function startInputProcess() {
     if (!helperReady || !catActive || inputProcess.running) return
     inputProcess.command = inputCommand()
-    inputState = "scanning"
+    inputState = sessionAccessGranted ? "authorizing" : "scanning"
+    accessBusy = sessionAccessGranted
     inputProcess.running = true
   }
 
   function updateInputProcess() {
     inputRestart.stop()
     if (!catActive) {
+      sessionAccessGranted = false
       if (inputProcess.running) {
         inputStopRequested = true
         inputProcess.running = false
@@ -304,6 +535,7 @@ Item {
       inputCount = 0
       leftDown = false
       rightDown = false
+      accessBusy = false
       return
     }
     if (!helperReady) {
@@ -319,7 +551,8 @@ Item {
     inputRestart.restart()
   }
 
-  function inputProcessExited() {
+  function inputProcessExited(exitCode) {
+    accessBusy = false
     if (!catActive || !helperReady) {
       inputStopRequested = false
       return
@@ -327,12 +560,25 @@ Item {
     if (inputStopRequested) {
       inputStopRequested = false
       inputRestart.interval = 150
-    } else {
-      inputFailureCount = Math.min(8, inputFailureCount + 1)
-      inputState = "error"
-      inputRestart.interval = Math.min(30000,
-        500 * Math.pow(2, inputFailureCount - 1))
+      inputRestart.restart()
+      return
     }
+    if (sessionAccessGranted) {
+      sessionAccessGranted = false
+      inputState = "permission"
+      inputCount = 0
+      leftDown = false
+      rightDown = false
+      if (accessError === "")
+        accessError = exitCode === 126 || exitCode === 127
+          ? "Input authorization was cancelled" : "Authorized input helper stopped"
+      return
+    }
+
+    inputFailureCount = Math.min(8, inputFailureCount + 1)
+    inputState = "error"
+    inputRestart.interval = Math.min(30000,
+      500 * Math.pow(2, inputFailureCount - 1))
     inputRestart.restart()
   }
 
@@ -361,7 +607,7 @@ Item {
       seen[name] = true
       options.push({
         value: name,
-        label: name + (devices[i].readable ? "" : " · no access")
+        label: name + ((devices[i].readable || accessInstalled) ? "" : " · no access")
       })
     }
     if (keyboardName !== "" && !seen[keyboardName])
@@ -381,7 +627,9 @@ Item {
 
   function inputStatusText() {
     if (!catActive) return "Disabled"
+    if (presentationSuppressed) return "Hidden for screen privacy"
     if (inputState === "building") return "Building input helper…"
+    if (inputState === "authorizing") return "Waiting for input authorization…"
     if (inputState === "scanning") return "Scanning keyboards…"
     if (inputState === "ready")
       return inputCount + (inputCount === 1 ? " keyboard active" : " keyboards active")
@@ -391,30 +639,93 @@ Item {
   }
 
   function checkInputAccess() {
-    if (accessProbe.running) return
-    accessProbe.command = [accessScript, "status"]
-    accessProbe.running = true
+    // Session access is represented by the lifetime of inputProcess only.
   }
 
   function setInputAccess(allow) {
-    if (accessBusy || accessProcess.running) return
+    if (accessBusy && allow) return
     accessError = ""
-    accessProcess.command = [accessScript, allow ? "install" : "remove"]
-    accessProcess.running = true
+    sessionAccessGranted = !!allow
+    accessBusy = !!allow
+    updateInputProcess()
   }
 
-  onShellChanged: syncFromShell()
+  onShellChanged: {
+    syncFromShell()
+    recoverPendingJournal()
+  }
 
   Connections {
     target: root.shell
-    function onShellConfigChanged() { root.syncFromShell() }
+    function onShellConfigChanged() {
+      root.syncFromShell()
+      root.recoverPendingJournal()
+    }
   }
 
   Component.onCompleted: {
     applySettings(defaults())
+    loadPendingJournal(pendingSettingsFile.text())
     buildProcess.command = [buildScript, helperPath]
     buildProcess.running = true
     checkInputAccess()
+  }
+
+  FileView {
+    id: pendingSettingsFile
+    path: root.pendingSettingsPath
+    preload: false
+    blockLoading: true
+    blockWrites: true
+    atomicWrites: true
+    printErrors: false
+    onLoadFailed: root.pendingJournalLoaded = true
+    onSaveFailed: console.warn("Bongo Cat could not save pending settings")
+  }
+
+  FileView {
+    id: shellConfigProbe
+    path: root.shell ? root.shell.userConfigPath : ""
+    preload: false
+    blockLoading: true
+    blockAllReads: true
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.verifyPersistedSettings(text())
+    onFileChanged: reload()
+  }
+
+  Timer {
+    id: persistenceVerificationTimer
+    interval: 250
+    repeat: true
+    onTriggered: {
+      root.persistVerificationAttempts += 1
+      shellConfigProbe.reload()
+      root.verifyPersistedSettings(shellConfigProbe.text())
+      if (root.persistVerificationPending
+          && root.persistVerificationAttempts >= 20)
+        root.retryUnverifiedPersistence()
+    }
+  }
+
+  Timer {
+    id: persistenceRetryTimer
+    interval: 1000
+    repeat: false
+    onTriggered: root.persistPendingSettings()
+  }
+
+  // A bar rebuild may abandon the panel while the long-lived service survives.
+  // Delay persistence so full plugin/shell teardown destroys this timer first.
+  Timer {
+    id: abandonedSessionTimer
+    interval: 750
+    repeat: false
+    onTriggered: {
+      if (root.panelSessionCount === 0 && root.settingsDirty)
+        root.persistPendingSettings()
+    }
   }
 
   Timer {
@@ -434,17 +745,6 @@ Item {
     interval: 150
     repeat: false
     onTriggered: root.startInputProcess()
-  }
-
-  Timer {
-    id: accessRescan
-    interval: 600
-    repeat: false
-    onTriggered: {
-      root.checkInputAccess()
-      root.scanDevices()
-      root.updateInputProcess()
-    }
   }
 
   Process {
@@ -477,7 +777,14 @@ Item {
     stdout: SplitParser {
       onRead: function(line) { root.handleInputLine(line) }
     }
-    onExited: root.inputProcessExited()
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "").trim()
+        if (message !== "") root.accessError = message.split("\n")[0]
+      }
+    }
+    onExited: function(exitCode) { root.inputProcessExited(exitCode) }
   }
 
   Process {
@@ -487,29 +794,6 @@ Item {
       onStreamFinished: root.applyDeviceList(text)
     }
     onExited: root.deviceScanRunning = false
-  }
-
-  Process {
-    id: accessProbe
-    onExited: function(exitCode) { root.accessInstalled = exitCode === 0 }
-  }
-
-  Process {
-    id: accessProcess
-    onStarted: root.accessBusy = true
-    onExited: function(exitCode) {
-      root.accessBusy = false
-      if (exitCode !== 0 && root.accessError === "")
-        root.accessError = "Input access was not changed"
-      accessRescan.restart()
-    }
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var message = String(text || "").trim()
-        if (message !== "") root.accessError = message.split("\n")[0]
-      }
-    }
   }
 
   IpcHandler {
@@ -523,6 +807,8 @@ Item {
     function resize(width: int): void { root.setCatWidth(width) }
     function test(): void { root.testAnimation() }
     function rescan(): void { root.scanDevices(); root.updateInputProcess() }
+    function allowInput(): void { root.setInputAccess(true) }
+    function revokeInput(): void { root.setInputAccess(false) }
     function status(): string {
       return JSON.stringify({
         active: root.catActive,
@@ -546,7 +832,7 @@ Item {
       PanelWindow {
         id: displayWindow
         screen: screenScope.modelData
-        visible: root.catActive && root.positionLocked
+        visible: root.catVisible && root.positionLocked
           && root.screenEnabled(screenScope.modelData)
         color: "transparent"
         implicitWidth: root.catWidth
@@ -581,7 +867,7 @@ Item {
       PanelWindow {
         id: editWindow
         screen: screenScope.modelData
-        visible: root.catActive && !root.positionLocked
+        visible: root.catVisible && !root.positionLocked
           && root.screenEnabled(screenScope.modelData)
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore

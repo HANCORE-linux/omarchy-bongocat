@@ -1,143 +1,153 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-rule_file=/etc/udev/rules.d/70-omarchy-bongocat-uaccess.rules
-expected_rule='# Omarchy Bongo Cat: grant raw keyboard access to the active local seat user.
-# WARNING: every process of that active user can then read keyboard events.
-SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"'
+[[ ${1:-} == "watch" ]] || {
+  echo "Usage: $0 watch <helper> [helper arguments...]" >&2
+  exit 2
+}
+helper=${2:-}
+[[ -n $helper ]] || {
+  echo "Missing input helper path." >&2
+  exit 2
+}
+shift 2
+helper_arguments=("$@")
 
-action=${1:-}
-case "$action" in
-  status)
-    [[ -f $rule_file ]] && cmp -s -- "$rule_file" <(printf '%s\n' "$expected_rule")
-    exit
-    ;;
-  install|remove) ;;
-  *) echo "Usage: $0 <status|install|remove>" >&2; exit 2 ;;
-esac
+uid=$(id -u)
+runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$uid}
+expected_helper="$runtime_dir/omarchy/bongocat/bongo-input"
+resolved_helper=$(readlink -f -- "$helper" 2>/dev/null || true)
+if [[ $resolved_helper != "$expected_helper" || ! -f $resolved_helper \
+    || ! -x $resolved_helper || $(stat -c '%u' -- "$resolved_helper") != "$uid" ]]; then
+  echo "Refusing an unexpected input helper path." >&2
+  exit 1
+fi
 
-# Pass the complete root program as an already-materialized argument to the
-# root-owned shell. Unlike executing a helper from ~/.config after the Polkit
-# prompt, this has no user-writable executable that can be swapped mid-prompt.
+selected_name=""
+for ((index = 0; index < ${#helper_arguments[@]}; ++index)); do
+  if [[ ${helper_arguments[index]} == "--name" && $((index + 1)) -lt ${#helper_arguments[@]} ]]; then
+    selected_name=${helper_arguments[index + 1]}
+    break
+  fi
+done
+
+if ! device_json=$("$resolved_helper" --list); then
+  echo "Could not discover keyboard devices." >&2
+  exit 1
+fi
+if ! keyboard_text=$(jq -er --arg selected "$selected_name" '
+  if type != "array" then error("unexpected device list") else
+    [.[] | select($selected == "" or .name == $selected) | .path]
+    | if all(.[]; type == "string") then join("\n")
+      else error("unexpected device path") end
+  end
+' <<<"$device_json"); then
+  echo "Could not parse keyboard devices." >&2
+  exit 1
+fi
+keyboard_paths=()
+if [[ -n $keyboard_text ]]; then
+  mapfile -t keyboard_paths <<<"$keyboard_text"
+fi
+(( ${#keyboard_paths[@]} <= 64 )) || {
+  echo "Too many keyboard devices." >&2
+  exit 1
+}
+
+expected_hash=$(sha256sum -- "$resolved_helper" | awk '{print $1}')
+[[ $expected_hash =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Could not hash the input helper." >&2
+  exit 1
+}
+
+# Root opens only the selected keyboard nodes. /usr/bin/setpriv then discards
+# root UID/GID and every supplementary group before the snapshotted helper is
+# executed. The helper itself never runs with elevated privileges.
 root_program=$(cat <<'ROOT_PROGRAM'
 set -euo pipefail
+PATH=/usr/sbin:/usr/bin
+export PATH
 
-rule_file=/etc/udev/rules.d/70-omarchy-bongocat-uaccess.rules
-action=${1:-}
-target_uid=${2:-}
-expected_rule='# Omarchy Bongo Cat: grant raw keyboard access to the active local seat user.
-# WARNING: every process of that active user can then read keyboard events.
-SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"'
+uid=${1:-}
+source_helper=${2:-}
+expected_hash=${3:-}
+path_count=${4:-}
+shift 4 || true
 
 if (( EUID != 0 )); then
   echo "This command must run as root." >&2
   exit 1
 fi
-if [[ ! $target_uid =~ ^[0-9]+$ ]] || (( target_uid < 1000 )) \
-    || ! getent passwd "$target_uid" >/dev/null; then
+if [[ ! $uid =~ ^[0-9]+$ ]] || (( uid < 1000 )) \
+    || ! getent passwd "$uid" >/dev/null; then
   echo "Invalid desktop user id." >&2
   exit 2
 fi
+if [[ ! $path_count =~ ^[0-9]+$ ]] || (( path_count > 64 || path_count > $# )); then
+  echo "Invalid keyboard device count." >&2
+  exit 2
+fi
+expected_source="/run/user/$uid/omarchy/bongocat/bongo-input"
+if [[ $source_helper != "$expected_source" || ! -f $source_helper \
+    || $(stat -c '%u' -- "$source_helper") != "$uid" \
+    || ! $expected_hash =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Refusing an unexpected input helper." >&2
+  exit 1
+fi
 
-rule_is_expected() {
-  [[ -f $rule_file ]] && cmp -s -- "$rule_file" \
-    <(printf '%s\n' "$expected_rule")
+device_paths=()
+for ((index = 0; index < path_count; ++index)); do
+  device=${1:-}
+  shift
+  if [[ ! $device =~ ^/dev/input/event[0-9]+$ || ! -c $device ]]; then
+    echo "Refusing an unexpected input device." >&2
+    exit 1
+  fi
+  properties=$(udevadm info --query=property --name="$device" 2>/dev/null || true)
+  if ! grep -qx 'ID_INPUT_KEYBOARD=1' <<<"$properties"; then
+    echo "Refusing a non-keyboard input device." >&2
+    exit 1
+  fi
+  device_paths+=("$device")
+done
+helper_arguments=("$@")
+
+gid=$(getent passwd "$uid" | cut -d: -f4)
+[[ $gid =~ ^[0-9]+$ ]] || {
+  echo "Could not resolve the desktop user group." >&2
+  exit 1
 }
 
-reload_input_rules() {
-  udevadm control --reload-rules
-  udevadm trigger --subsystem-match=input --sysname-match='event*' --action=change
-  udevadm settle
-}
+staging_dir="/run/omarchy-bongocat-$uid"
+rm -rf -- "$staging_dir"
+install -d -m 0700 -o root -g root -- "$staging_dir"
+temporary="$staging_dir/bongo-input"
+trap 'rm -rf -- "$staging_dir"' EXIT
+cp --reflink=never -- "$source_helper" "$temporary"
+chown root:root "$temporary"
+chmod 0511 "$temporary"
+actual_hash=$(sha256sum -- "$temporary" | awk '{print $1}')
+if [[ $actual_hash != "$expected_hash" ]]; then
+  echo "The input helper changed during authorization." >&2
+  exit 1
+fi
 
-keyboard_events() {
-  local device
-  for device in /dev/input/event*; do
-    [[ -e $device ]] || continue
-    if udevadm info --query=property --name="$device" 2>/dev/null \
-        | grep -qx 'ID_INPUT_KEYBOARD=1'; then
-      printf '%s\n' "$device"
-    fi
-  done
-}
+exec {helper_fd}<"$temporary"
+session_arguments=(--session-fds --close-fd "$helper_fd")
+for device in "${device_paths[@]}"; do
+  exec {input_fd}<"$device"
+  session_arguments+=(--fd "$input_fd")
+done
+rm -f -- "$temporary"
+rmdir -- "$staging_dir"
+trap - EXIT
 
-clear_unmanaged_keyboard_acls() {
-  command -v setfacl >/dev/null 2>&1 || return 0
-  local device properties
-  while IFS= read -r device; do
-    properties=$(udevadm info --query=property --name="$device" 2>/dev/null || true)
-    # Keep ACLs that are still backed by another installed uaccess policy,
-    # such as the stock joystick rule on a composite input device.
-    if grep -Eq '^(CURRENT_TAGS|TAGS)=.*:uaccess:' <<<"$properties"; then
-      continue
-    fi
-    setfacl -x "u:${target_uid}" "$device" 2>/dev/null || true
-  done < <(keyboard_events)
-}
-
-case "$action" in
-  install)
-    if [[ -e $rule_file ]] && ! rule_is_expected; then
-      echo "Refusing to overwrite an unrelated udev rule: $rule_file" >&2
-      exit 1
-    fi
-    had_rule=false
-    [[ -e $rule_file ]] && had_rule=true
-    if [[ $had_rule == false ]]; then
-      install -d -m 0755 /etc/udev/rules.d
-      temporary=$(mktemp /etc/udev/rules.d/.bongocat-uaccess.XXXXXX)
-      trap 'rm -f -- "$temporary"' EXIT
-      printf '%s\n' "$expected_rule" >"$temporary"
-      chmod 0644 "$temporary"
-      mv -f -- "$temporary" "$rule_file"
-      trap - EXIT
-    fi
-    if ! reload_input_rules; then
-      if [[ $had_rule == false ]]; then
-        rm -f -- "$rule_file"
-        udevadm control --reload-rules || true
-        udevadm trigger --subsystem-match=input --sysname-match='event*' \
-          --action=change || true
-        udevadm settle || true
-        clear_unmanaged_keyboard_acls
-      fi
-      exit 1
-    fi
-    ;;
-  remove)
-    if [[ ! -e $rule_file ]]; then
-      exit 0
-    fi
-    if ! rule_is_expected; then
-      echo "Refusing to remove an unrelated udev rule: $rule_file" >&2
-      exit 1
-    fi
-    backup=$(mktemp)
-    cp -- "$rule_file" "$backup"
-    rm -f -- "$rule_file"
-    if ! reload_input_rules; then
-      install -m 0644 "$backup" "$rule_file"
-      rm -f -- "$backup"
-      udevadm control --reload-rules || true
-      udevadm trigger --subsystem-match=input --sysname-match='event*' \
-        --action=change || true
-      udevadm settle || true
-      exit 1
-    fi
-    rm -f -- "$backup"
-
-    # A removed uaccess tag does not reliably clear an ACL already attached to
-    # a live device. Remove this user's ACL only where no other uaccess policy
-    # still owns it. Already-open descriptors require logout/replug to revoke.
-    clear_unmanaged_keyboard_acls
-    ;;
-  *)
-    echo "Invalid action." >&2
-    exit 2
-    ;;
-esac
+exec /usr/bin/setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+  --no-new-privs "/proc/self/fd/$helper_fd" \
+  "${session_arguments[@]}" "${helper_arguments[@]}"
 ROOT_PROGRAM
 )
 
-exec pkexec /usr/bin/bash -c "$root_program" bongocat-input-access \
-  "$action" "$(id -u)"
+exec pkexec /usr/bin/bash -c "$root_program" bongocat-session-input \
+  "$uid" "$resolved_helper" "$expected_hash" "${#keyboard_paths[@]}" \
+  "${keyboard_paths[@]}" "${helper_arguments[@]}"

@@ -3,8 +3,8 @@
 ![Bongo Cat](preview.png)
 
 A lightweight native Quickshell plugin with no AUR package and no separate
-`wayland-bongocat` process. Quickshell renders the cat while a small local C
-helper emits only `L` or `R` paw events.
+`wayland-bongocat` process. Quickshell renders the cat while the shipped local
+C helper emits only `L` or `R` paw events.
 
 ## Installation
 
@@ -20,54 +20,71 @@ omarchy plugin add https://github.com/HANCORE-linux/omarchy-bongocat.git --enabl
 - Use the compact header buttons for enable, position lock, and animation test.
 - Unlock and drag the cat to reposition it.
 - While unlocked, use the mouse wheel to resize it and right-click to lock it.
+- The lock prevents direct pointer dragging; panel position fields, arrows, and
+  Reset remain available.
 - Set the width from 120 to 640 px.
 - Choose `Default`, `Theme`, or a custom `#RRGGBB` color.
 - In the open panel, press `P` to lock or unlock, `T` to test, or use the arrow
-  keys to move an unlocked cat by 10 px.
+  keys to move the cat by 10 px.
 
 ## Keyboard access
 
 Wayland intentionally provides no API that lets a passive overlay observe all
-keyboard input. One explicit Polkit authorization is therefore required. The
-`Allow Input` button installs this udev rule:
+keyboard input. `Allow Input` therefore requests explicit Polkit authorization
+for the current Omarchy shell session.
 
-```udev
-SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
-```
+The authorized launcher checks a root-owned runtime snapshot for changes made
+during authorization and opens only selected keyboard devices. It then uses
+`/usr/bin/setpriv` to discard the root UID, root GID, and all supplementary
+groups before the helper is executed. The snapshot is unlinked before
+execution. The unprivileged shipped helper then:
 
-This grants keyboard-event access to the active local desktop user. It is more
-limited than permanent membership in the `input` group, but it still means that
-**every process running as the active user could read raw keyboard events**.
-Access can be removed with `Revoke Input`, even while Bongo Cat is disabled.
-This blocks new readers and restarts the Bongo Cat helper without access.
-Processes that already hold an open device descriptor retain it until logout,
-reboot, or device reconnection.
+- reads only the inherited, read-only keyboard descriptors;
+- binds its lifetime to `omarchy-shell`; and
+- emits only `L` or `R` paw events, never characters or keycodes.
 
-The plugin helper itself does not log characters or keycodes. It sends only
-left-paw and right-paw events to Quickshell. Input-device access is still
-security-sensitive and is never enabled automatically.
+No udev rule, device ACL, `input` group membership, system service, or cleanup
+hook is installed. `Revoke Input`, disabling or removing the plugin, a shell
+exit, or a shell crash ends the helper and closes its keyboard descriptors.
+Authorization must be granted again after a complete shell restart or login.
+A newly connected keyboard requires `Rescan` and renewed authorization because
+an unprivileged running helper cannot open additional event devices.
+
+Raw input remains security-sensitive because the authorized helper necessarily
+sees keyboard events internally. Access is never enabled automatically.
+
+### Trust boundary
+
+The plugin and runtime helper are owned by the desktop user. Polkit confirms the
+authorization request, but it cannot authenticate those user-writable files. A
+process already running as the same user could replace them before authorization
+and receive the opened keyboard descriptors. Do not authorize input after a
+suspected user-session compromise. Preventing this would require a persistent,
+root-owned trust anchor, which this plugin intentionally does not install.
 
 ## Local build
 
-On first load, the helper is compiled with the existing C compiler and stored
-at:
+The helper is compiled with the existing C compiler and stored for the current
+login session at:
 
 ```text
-~/.cache/omarchy/bongocat/bongo-input
+$XDG_RUNTIME_DIR/omarchy/bongocat/bongo-input
 ```
 
-No AUR package is installed.
+The runtime directory is cleared automatically at logout. No AUR package is
+installed.
 
-## Before removal
+## Removal
 
-First select `Revoke Input` in the panel. Alternatively, run:
+Use the normal Omarchy command:
 
 ```bash
-~/.config/omarchy/plugins/hancore.bongocat/helper/input-access remove
-rm -rf ~/.cache/omarchy/bongocat
+omarchy plugin remove hancore.bongocat
 ```
 
-Then remove the plugin directory.
+Omarchy removes the bar entry from `shell.json` and deletes the plugin. The
+session-scoped input helper exits automatically, so no privileged cleanup step
+is required.
 
 ## Credits
 

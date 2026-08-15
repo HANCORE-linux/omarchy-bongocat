@@ -5,11 +5,8 @@ output=${1:?missing output path}
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_file="$source_dir/bongo-input.c"
 
-if [[ -x $output && $output -nt $source_file \
-    && $output -nt ${BASH_SOURCE[0]} ]]; then
-  exit 0
-fi
-
+# Always replace the user-writable runtime binary from source. The helper is
+# tiny, and a timestamp-only cache could preserve an unrelated executable.
 command -v cc >/dev/null 2>&1 || {
   echo "No C compiler found (cc)." >&2
   exit 1

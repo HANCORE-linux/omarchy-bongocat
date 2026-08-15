@@ -29,20 +29,214 @@ Panel {
     ? Math.max(0, activeScreen.width - bongo.catWidth) : 8000
   readonly property int positionYMaximum: bongo && activeScreen
     ? Math.max(0, activeScreen.height - bongo.catHeight) : 8000
+  readonly property bool presentationSuppressed: bongo
+    ? bongo.presentationSuppressed : false
+  property var panelSessionService: null
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: {
-    if (opened && bongo) {
-      bongo.checkInputAccess()
-      bongo.scanDevices()
+    if (opened) {
+      beginPanelSession()
+      if (bongo) {
+        bongo.checkInputAccess()
+        bongo.scanDevices()
+      }
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    } else {
+      finishPanelSession()
     }
+  }
+
+  onBongoChanged: if (opened) beginPanelSession()
+  onPresentationSuppressedChanged: if (presentationSuppressed) close()
+  Component.onDestruction: abandonPanelSession()
+
+  function beginPanelSession() {
+    if (panelSessionService || !bongo
+        || typeof bongo.beginPanelSession !== "function") return
+    panelSessionService = bongo
+    panelSessionService.beginPanelSession()
+  }
+
+  function finishPanelSession() {
+    if (!panelSessionService) return
+    var service = panelSessionService
+    panelSessionService = null
+    if (typeof service.endPanelSession === "function") service.endPanelSession()
+  }
+
+  function abandonPanelSession() {
+    if (!panelSessionService) return
+    var service = panelSessionService
+    panelSessionService = null
+    if (typeof service.abandonPanelSession === "function") service.abandonPanelSession()
   }
 
   function toggleActive() {
     if (bongo) bongo.setCatActive(!bongo.catActive)
+  }
+
+  function moveFromPanel(dx, dy) {
+    if (!bongo) return
+    bongo.setPosition(positionXValue + dx, positionYValue + dy)
+  }
+
+  component PanelGlyphButton: Button {
+    id: glyphButton
+
+    property string glyph: ""
+    property color glyphColor: selected
+      ? Style.selectedStateColor(foreground, accent) : foreground
+    property real glyphCanvasSize: Math.max(Style.space(22), iconSize + Style.space(4))
+
+    iconText: ""
+
+    OpticalGlyph {
+      anchors.centerIn: parent
+      width: glyphButton.glyphCanvasSize
+      height: glyphButton.glyphCanvasSize
+      text: glyphButton.glyph
+      fontFamily: glyphButton.fontFamily
+      fontSize: glyphButton.iconSize
+      color: glyphButton.glyphColor
+    }
+  }
+
+  component FieldLabel: Text {
+    color: root.foreground
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.body
+    font.bold: false
+  }
+
+  component EqualChoiceGroup: Row {
+    id: choiceGroup
+
+    property var options: []
+    property string value: ""
+    property color foreground: root.foreground
+    property color background: root.background
+    property color accent: root.accent
+    property string fontFamily: root.fontFamily
+    property real buttonWidth: Style.space(80)
+    property int focusedIndex: -1
+
+    signal changed(string value)
+
+    spacing: Style.spacing.md
+    height: Style.spacing.controlHeight
+    activeFocusOnTab: true
+
+    function optionValue(option) {
+      return String(option && typeof option === "object" ? option.value : option)
+    }
+
+    function optionLabel(option) {
+      return String(option && typeof option === "object" ? option.label : option)
+    }
+
+    function selectedIndex() {
+      for (var i = 0; i < options.length; i++)
+        if (optionValue(options[i]) === value) return i
+      return 0
+    }
+
+    onActiveFocusChanged: focusedIndex = activeFocus ? selectedIndex() : -1
+
+    Keys.onPressed: function(event) {
+      if (event.key === Qt.Key_Left || event.key === Qt.Key_H || event.text === "h") {
+        focusedIndex = Math.max(0, focusedIndex - 1)
+        event.accepted = true
+      } else if (event.key === Qt.Key_Right || event.key === Qt.Key_L || event.text === "l") {
+        focusedIndex = Math.min(options.length - 1, focusedIndex + 1)
+        event.accepted = true
+      } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+          || event.key === Qt.Key_Space) && focusedIndex >= 0) {
+        changed(optionValue(options[focusedIndex]))
+        event.accepted = true
+      }
+    }
+
+    Repeater {
+      model: choiceGroup.options
+
+      delegate: Button {
+        required property var modelData
+        required property int index
+
+        width: choiceGroup.buttonWidth
+        height: choiceGroup.height
+        text: choiceGroup.optionLabel(modelData)
+        active: choiceGroup.optionValue(modelData) === choiceGroup.value
+        hasCursor: choiceGroup.activeFocus && choiceGroup.focusedIndex === index
+        bordered: true
+        foreground: choiceGroup.foreground
+        background: choiceGroup.background
+        accent: choiceGroup.accent
+        fontFamily: choiceGroup.fontFamily
+        onClicked: choiceGroup.changed(choiceGroup.optionValue(modelData))
+      }
+    }
+  }
+
+  component BongoKeyCatcher: Item {
+    id: catcher
+
+    property bool blocked: false
+    property bool escapeBlocked: false
+
+    signal moveRequested(int dx, int dy)
+    signal activateRequested()
+    signal returnRequested()
+    signal closeRequested()
+    signal deleteRequested()
+    signal tabRequested(int direction)
+    signal textKey(string text)
+
+    focus: true
+    Keys.priority: Keys.BeforeItem
+    Keys.onPressed: function(event) {
+      if (event.key === Qt.Key_Escape) {
+        if (!escapeBlocked) {
+          closeRequested()
+          event.accepted = true
+        }
+        return
+      }
+      if (blocked) return
+
+      if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+        tabRequested((event.modifiers & Qt.ShiftModifier)
+          || event.key === Qt.Key_Backtab ? -1 : 1)
+        event.accepted = true
+      } else if (event.key === Qt.Key_Down || event.text === "j") {
+        moveRequested(0, 1)
+        event.accepted = true
+      } else if (event.key === Qt.Key_Up || event.text === "k") {
+        moveRequested(0, -1)
+        event.accepted = true
+      } else if (event.key === Qt.Key_Right || event.text === "l") {
+        moveRequested(1, 0)
+        event.accepted = true
+      } else if (event.key === Qt.Key_Left || event.text === "h") {
+        moveRequested(-1, 0)
+        event.accepted = true
+      } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+        returnRequested()
+        activateRequested()
+        event.accepted = true
+      } else if (event.key === Qt.Key_Space) {
+        activateRequested()
+        event.accepted = true
+      } else if (event.text === "x" || event.text === "X") {
+        deleteRequested()
+        event.accepted = true
+      } else if (event.text && event.text.length === 1) {
+        textKey(event.text)
+      }
+    }
   }
 
   WidgetButton {
@@ -86,18 +280,18 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(560))
 
-    PanelKeyCatcher {
+    BongoKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: !activeFocus || keyboardPicker.popupOpen || monitorPicker.popupOpen
+      escapeBlocked: keyboardPicker.popupOpen || monitorPicker.popupOpen
       onCloseRequested: root.close()
       onTabRequested: function(direction) {
-        if (direction < 0) testButton.forceActiveFocus()
+        if (direction < 0 && testButton.enabled) testButton.forceActiveFocus()
         else enableButton.forceActiveFocus()
       }
       onMoveRequested: function(dx, dy) {
-        if (!root.bongo || root.bongo.positionLocked) return
-        root.bongo.nudgePosition(dx * 10, dy * 10)
+        root.moveFromPanel(dx * 10, dy * 10)
       }
       onTextKey: function(text) {
         if (!root.bongo) return
@@ -154,9 +348,11 @@ Panel {
               }
               Text {
                 text: root.bongo ? root.bongo.inputStatusText() : "Loading…"
-                color: root.dim
+                color: Qt.darker(root.foreground, 1.25)
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                font.pixelSize: Style.font.bodySmall
+                font.bold: false
+                renderType: Text.NativeRendering
                 elide: Text.ElideRight
                 width: parent.width
               }
@@ -167,12 +363,16 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(5)
 
-              Button {
+              PanelGlyphButton {
                 id: enableButton
-                width: 36
-                iconText: "󰐥"
+                width: Style.spacing.controlHeight
+                height: Style.spacing.controlHeight
+                glyph: "\uf011"
+                iconSize: Math.max(1, Style.font.iconLarge - 1)
                 tooltipText: root.bongo && root.bongo.catActive ? "Disable" : "Enable"
                 selected: root.bongo && root.bongo.catActive
+                glyphColor: selected
+                  ? Style.selectedStateColor(foreground, accent) : root.dim
                 bordered: true
                 focusable: true
                 foreground: root.foreground
@@ -180,34 +380,38 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: root.toggleActive()
               }
-              Button {
+              PanelGlyphButton {
                 id: lockButton
-                width: 36
-                iconText: root.bongo && root.bongo.positionLocked ? "󰌾" : "󰌿"
-                tooltipText: root.bongo && root.bongo.positionLocked ? "Unlock & Drag" : "Lock Position"
+                width: Style.spacing.controlHeight
+                height: Style.spacing.controlHeight
+                glyph: root.bongo && root.bongo.positionLocked ? "\uf023" : "\uf09c"
+                iconSize: Math.max(1, Style.font.iconLarge - 1)
+                tooltipText: root.bongo && root.bongo.positionLocked
+                  ? "Locked · Click to unlock" : "Unlocked · Click to lock"
                 selected: root.bongo && root.bongo.positionLocked
+                glyphColor: selected
+                  ? Style.selectedStateColor(foreground, accent) : root.accent
                 enabled: root.bongo && root.bongo.catActive
+                opacity: enabled ? 1 : 0.38
                 bordered: true
                 focusable: true
                 foreground: root.foreground
                 accent: root.accent
                 fontFamily: root.fontFamily
                 onClicked: {
-                  if (!root.bongo) return
-                  if (root.bongo.positionLocked) {
-                    root.bongo.setPositionLocked(false)
-                    root.close()
-                  } else {
-                    root.bongo.setPositionLocked(true)
-                  }
+                  if (root.bongo)
+                    root.bongo.setPositionLocked(!root.bongo.positionLocked)
                 }
               }
-              Button {
+              PanelGlyphButton {
                 id: testButton
-                width: 36
-                iconText: "󰜺"
+                width: Style.spacing.controlHeight
+                height: Style.spacing.controlHeight
+                glyph: "\uf0d0"
+                iconSize: Math.max(1, Style.font.iconLarge - 1)
                 tooltipText: "Test Animation (T)"
                 enabled: root.bongo && root.bongo.catActive
+                opacity: enabled ? 1 : 0.38
                 bordered: true
                 focusable: true
                 foreground: root.foreground
@@ -219,28 +423,24 @@ Panel {
           }
 
           PanelSeparator { width: parent.width; foreground: root.foreground }
-          PanelSectionHeader {
+          FieldLabel {
             width: parent.width
             text: "APPEARANCE"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
           }
 
           Row {
             width: parent.width
             spacing: Style.space(7)
 
-            Text {
+            FieldLabel {
               width: 38
               anchors.verticalCenter: parent.verticalCenter
               text: "Size"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
             }
             Button {
               id: sizeDownButton
-              width: 36
+              width: Style.spacing.controlHeight
+              height: Style.spacing.controlHeight
               text: "−"
               tooltipText: "20 px smaller"
               bordered: true
@@ -277,7 +477,8 @@ Panel {
             }
             Button {
               id: sizeUpButton
-              width: 36
+              width: Style.spacing.controlHeight
+              height: Style.spacing.controlHeight
               text: "+"
               tooltipText: "20 px larger"
               bordered: true
@@ -287,7 +488,8 @@ Panel {
             }
           }
 
-          ButtonGroup {
+          EqualChoiceGroup {
+            id: sizePresetGroup
             anchors.horizontalCenter: parent.horizontalCenter
             options: [
               { value: "180", label: "Small" },
@@ -295,38 +497,31 @@ Panel {
               { value: "420", label: "Large" }
             ]
             value: root.bongo ? String(root.bongo.catWidth) : "280"
-            foreground: root.foreground
-            background: root.background
-            accent: root.accent
-            fontFamily: root.fontFamily
             onChanged: function(next) {
               if (root.bongo) root.bongo.setCatWidth(parseInt(next, 10))
             }
           }
 
-          Row {
+          Item {
             width: parent.width
-            spacing: Style.space(8)
+            height: colorModeGroup.height
 
-            Text {
-              width: 38
+            FieldLabel {
+              anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
               text: "Color"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
             }
-            ButtonGroup {
+
+            EqualChoiceGroup {
+              id: colorModeGroup
+              anchors.horizontalCenter: parent.horizontalCenter
+              buttonWidth: sizePresetGroup.buttonWidth
               options: [
                 { value: "default", label: "Default" },
                 { value: "theme", label: "Theme" },
                 { value: "hex", label: "Hex" }
               ]
               value: root.bongo ? root.bongo.colorMode : "default"
-              foreground: root.foreground
-              background: root.background
-              accent: root.accent
-              fontFamily: root.fontFamily
               onChanged: function(next) {
                 if (root.bongo) root.bongo.setColorMode(next)
               }
@@ -369,11 +564,9 @@ Panel {
           }
 
           PanelSeparator { width: parent.width; foreground: root.foreground }
-          PanelSectionHeader {
+          FieldLabel {
             width: parent.width
             text: "POSITION"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
           }
 
           Row {
@@ -381,142 +574,259 @@ Panel {
             spacing: Style.space(8)
 
             NumberField {
+              id: positionXField
               width: (parent.width - parent.spacing) / 2
-              enabled: root.bongo && !root.bongo.positionLocked
-              label: "X"
+              enabled: root.bongo && root.bongo.catActive
+              label: ""
               value: root.positionXValue
               from: 0
               to: root.positionXMaximum
               stepSize: 10
               fieldWidth: width
+              field.leftPadding: Style.space(34)
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
               onModified: function(next) {
                 if (root.bongo) root.bongo.setPosition(next, root.positionYValue)
               }
+
+              Text {
+                parent: positionXField.field
+                z: 2
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(11)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "X"
+                color: positionXField.enabled ? root.dim : Qt.darker(root.dim, 1.5)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
             }
             NumberField {
+              id: positionYField
               width: (parent.width - parent.spacing) / 2
-              enabled: root.bongo && !root.bongo.positionLocked
-              label: "Y"
+              enabled: root.bongo && root.bongo.catActive
+              label: ""
               value: root.positionYValue
               from: 0
               to: root.positionYMaximum
               stepSize: 10
               fieldWidth: width
+              field.leftPadding: Style.space(34)
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
               onModified: function(next) {
                 if (root.bongo) root.bongo.setPosition(root.positionXValue, next)
               }
+
+              Text {
+                parent: positionYField.field
+                z: 2
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(11)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Y"
+                color: positionYField.enabled ? root.dim : Qt.darker(root.dim, 1.5)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
             }
           }
 
           Row {
+            id: positionActions
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(5)
+            readonly property real controlWidth: Style.space(52)
+            readonly property real controlHeight: Style.spacing.controlHeight
 
-            Button {
-              iconText: "󰁍"
+            PanelGlyphButton {
+              width: positionActions.controlWidth
+              height: positionActions.controlHeight
+              glyph: "\uf060"
+              iconSize: Style.font.icon
               tooltipText: "10 px left"
-              enabled: root.bongo && !root.bongo.positionLocked
+              enabled: root.bongo && root.bongo.catActive
+              opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
               foreground: root.foreground
-              onClicked: root.bongo.nudgePosition(-10, 0)
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.moveFromPanel(-10, 0)
             }
-            Button {
-              iconText: "󰁅"
+            PanelGlyphButton {
+              width: positionActions.controlWidth
+              height: positionActions.controlHeight
+              glyph: "\uf062"
+              iconSize: Style.font.icon
               tooltipText: "10 px up"
-              enabled: root.bongo && !root.bongo.positionLocked
+              enabled: root.bongo && root.bongo.catActive
+              opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
               foreground: root.foreground
-              onClicked: root.bongo.nudgePosition(0, -10)
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.moveFromPanel(0, -10)
             }
-            Button {
-              iconText: "󰁝"
+            PanelGlyphButton {
+              width: positionActions.controlWidth
+              height: positionActions.controlHeight
+              glyph: "\uf063"
+              iconSize: Style.font.icon
               tooltipText: "10 px down"
-              enabled: root.bongo && !root.bongo.positionLocked
+              enabled: root.bongo && root.bongo.catActive
+              opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
               foreground: root.foreground
-              onClicked: root.bongo.nudgePosition(0, 10)
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.moveFromPanel(0, 10)
             }
-            Button {
-              iconText: "󰁔"
+            PanelGlyphButton {
+              width: positionActions.controlWidth
+              height: positionActions.controlHeight
+              glyph: "\uf061"
+              iconSize: Style.font.icon
               tooltipText: "10 px right"
-              enabled: root.bongo && !root.bongo.positionLocked
+              enabled: root.bongo && root.bongo.catActive
+              opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
               foreground: root.foreground
-              onClicked: root.bongo.nudgePosition(10, 0)
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.moveFromPanel(10, 0)
             }
             Button {
+              width: positionActions.controlWidth
+              height: positionActions.controlHeight
               text: "Reset"
-              enabled: root.bongo && !root.bongo.positionLocked
+              enabled: root.bongo && root.bongo.catActive
+              opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
               foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
               onClicked: root.bongo.resetPosition()
             }
           }
 
           Row {
             width: parent.width
+            height: Math.max(pawControl.implicitHeight, monitorControl.implicitHeight)
             spacing: Style.space(8)
 
-            NumberField {
+            Column {
+              id: pawControl
               width: (parent.width - parent.spacing) / 2
-              label: "Paw (ms)"
-              value: root.bongo ? root.bongo.keypressDuration : 105
-              from: 40
-              to: 500
-              stepSize: 5
-              fieldWidth: width
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onModified: function(next) {
-                if (root.bongo) root.bongo.setKeypressDuration(next)
+              spacing: Style.spacing.labelGap
+
+              FieldLabel {
+                text: "Paw (ms)"
+              }
+
+              NumberField {
+                width: parent.width
+                label: ""
+                value: root.bongo ? root.bongo.keypressDuration : 105
+                from: 40
+                to: 500
+                stepSize: 5
+                fieldWidth: width
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onModified: function(next) {
+                  if (root.bongo) root.bongo.setKeypressDuration(next)
+                }
               }
             }
-            Dropdown {
-              id: monitorPicker
+
+            Column {
+              id: monitorControl
               width: (parent.width - parent.spacing) / 2
-              label: "Monitor"
-              value: root.bongo ? root.bongo.monitorName : ""
-              options: root.bongo ? root.bongo.monitorOptions() : []
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onChanged: function(next) {
-                if (root.bongo) root.bongo.setMonitorName(next)
+              spacing: Style.spacing.labelGap
+
+              FieldLabel {
+                text: "Monitor"
+              }
+
+              Dropdown {
+                id: monitorPicker
+                width: parent.width
+                label: ""
+                showLabel: false
+                value: root.bongo ? root.bongo.monitorName : ""
+                options: root.bongo ? root.bongo.monitorOptions() : []
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(next) {
+                  if (root.bongo) root.bongo.setMonitorName(next)
+                }
               }
             }
           }
 
           PanelSeparator { width: parent.width; foreground: root.foreground }
-          PanelSectionHeader {
+          Row {
             width: parent.width
-            text: "INPUT"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            height: Math.max(inputHeader.implicitHeight, inputRescanButton.implicitHeight)
+            spacing: Style.space(8)
+
+            FieldLabel {
+              id: inputHeader
+              width: parent.width - inputRescanButton.width - parent.spacing
+              anchors.verticalCenter: parent.verticalCenter
+              text: "INPUT"
+            }
+
+            Button {
+              id: inputRescanButton
+              anchors.verticalCenter: parent.verticalCenter
+              height: Style.spacing.controlHeight
+              text: root.bongo && root.bongo.deviceScanRunning ? "Scanning…" : "Rescan"
+              enabled: root.bongo && !root.bongo.deviceScanRunning
+              bordered: true
+              focusable: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: {
+                root.bongo.scanDevices()
+                root.bongo.updateInputProcess()
+              }
+            }
           }
 
-          Dropdown {
-            id: keyboardPicker
+          Column {
             width: parent.width
-            label: "Keyboard"
-            value: root.bongo ? root.bongo.keyboardName : ""
-            options: root.bongo ? root.bongo.keyboardOptions() : []
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onChanged: function(next) {
-              if (root.bongo) root.bongo.setKeyboardName(next)
+            spacing: Style.spacing.labelGap
+
+            FieldLabel {
+              text: "Keyboard"
+            }
+
+            Dropdown {
+              id: keyboardPicker
+              width: parent.width
+              label: ""
+              showLabel: false
+              value: root.bongo ? root.bongo.keyboardName : ""
+              options: root.bongo ? root.bongo.keyboardOptions() : []
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(next) {
+                if (root.bongo) root.bongo.setKeyboardName(next)
+              }
             }
           }
 
@@ -531,13 +841,17 @@ Panel {
           }
 
           Row {
+            visible: root.bongo && ((root.bongo.needsInputAccess
+              && !root.bongo.accessInstalled) || root.bongo.accessInstalled)
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(8)
 
             Button {
               visible: root.bongo && root.bongo.needsInputAccess
                 && !root.bongo.accessInstalled
+              height: Style.spacing.controlHeight
               text: root.bongo && root.bongo.accessBusy ? "Allowing…" : "Allow Input"
+              tooltipText: "Session-only raw keyboard access; trusts user-owned plugin files"
               enabled: root.bongo && !root.bongo.accessBusy
               bordered: true
               focusable: true
@@ -547,23 +861,14 @@ Panel {
               onClicked: root.bongo.setInputAccess(true)
             }
             Button {
-              text: root.bongo && root.bongo.deviceScanRunning ? "Scanning…" : "Rescan"
-              enabled: root.bongo && !root.bongo.deviceScanRunning
+              visible: root.bongo && root.bongo.accessInstalled
+              height: Style.spacing.controlHeight
+              text: root.bongo && root.bongo.accessBusy ? "Cancel Input" : "Revoke Input"
+              tooltipText: "Close the session keyboard descriptors"
+              enabled: root.bongo
               bordered: true
               focusable: true
               foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: {
-                root.bongo.scanDevices()
-                root.bongo.updateInputProcess()
-              }
-            }
-            Button {
-              visible: root.bongo && root.bongo.accessInstalled
-              text: "Revoke Input"
-              enabled: root.bongo && !root.bongo.accessBusy
-              focusable: true
-              foreground: root.dim
               fontFamily: root.fontFamily
               onClicked: root.bongo.setInputAccess(false)
             }

@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include <ctype.h>
@@ -12,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -27,10 +29,29 @@ typedef struct {
 } keyboard_t;
 
 static volatile sig_atomic_t running = 1;
+static pid_t bound_parent_pid = -1;
 
 static void handle_signal(int signal_number) {
   (void)signal_number;
   running = 0;
+}
+
+static bool enter_session_mode(void) {
+  if (geteuid() == 0) {
+    fputs("Session input helper must not run as root.\n", stderr);
+    return false;
+  }
+
+  pid_t parent = getppid();
+  if (parent <= 1 || prctl(PR_SET_PDEATHSIG, SIGTERM) != 0 || getppid() != parent ||
+      prctl(PR_SET_DUMPABLE, 0) != 0 ||
+      prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+      prctl(PR_SET_NAME, "bongo-input", 0, 0, 0) != 0) {
+    fputs("Could not harden the session input helper.\n", stderr);
+    return false;
+  }
+  bound_parent_pid = parent;
+  return true;
 }
 
 static void trim_newline(char *text) {
@@ -261,7 +282,8 @@ static void emit_status(const char *state, int count, char *last_state,
   *last_count = count;
 }
 
-static int watch_keyboards(const char *selected_name) {
+static int watch_keyboards(const char *selected_name, const int *inherited_fds,
+                           int inherited_count) {
   keyboard_t devices[MAX_DEVICES];
   int device_count = 0;
   long next_scan = 0;
@@ -272,9 +294,25 @@ static int watch_keyboards(const char *selected_name) {
   signal(SIGINT, handle_signal);
   signal(SIGTERM, handle_signal);
 
+  bool session_scoped = inherited_count >= 0;
+  if (session_scoped) {
+    for (int i = 0; i < inherited_count && i < MAX_DEVICES; ++i) {
+      if (inherited_fds[i] < 3 || fcntl(inherited_fds[i], F_GETFD) < 0)
+        continue;
+      devices[device_count] = (keyboard_t){.readable = true, .fd = inherited_fds[i]};
+      snprintf(devices[device_count].path, sizeof(devices[device_count].path),
+               "inherited:%d", inherited_fds[i]);
+      ++device_count;
+    }
+    emit_status(device_count > 0 ? "ready" : "no-device", device_count,
+                last_state, sizeof(last_state), &last_count);
+  }
+
   while (running) {
+    if (bound_parent_pid > 1 && getppid() != bound_parent_pid)
+      break;
     long now = monotonic_seconds();
-    if (now >= next_scan) {
+    if (!session_scoped && now >= next_scan) {
       close_keyboards(devices, device_count);
       device_count = discover_keyboards(devices, selected_name, true);
       int readable_count = 0;
@@ -300,20 +338,33 @@ static int watch_keyboards(const char *selected_name) {
       map[poll_count++] = i;
     }
 
-    int timeout_ms = (int)((next_scan - monotonic_seconds()) * 1000);
-    if (timeout_ms < 100)
-      timeout_ms = 100;
-    if (timeout_ms > 1000)
-      timeout_ms = 1000;
+    int timeout_ms = 1000;
+    if (!session_scoped) {
+      timeout_ms = (int)((next_scan - monotonic_seconds()) * 1000);
+      if (timeout_ms < 100)
+        timeout_ms = 100;
+      if (timeout_ms > 1000)
+        timeout_ms = 1000;
+    }
 
     int result = poll(poll_fds, (nfds_t)poll_count, timeout_ms);
     if (result <= 0)
       continue;
 
     for (int i = 0; i < poll_count; ++i) {
-      if (!(poll_fds[i].revents & (POLLIN | POLLERR | POLLHUP)))
+      if (!(poll_fds[i].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)))
         continue;
       keyboard_t *device = &devices[map[i]];
+      if (poll_fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        close(device->fd);
+        device->fd = -1;
+        int remaining = 0;
+        for (int index = 0; index < device_count; ++index)
+          remaining += devices[index].fd >= 0 ? 1 : 0;
+        emit_status(remaining > 0 ? "ready" : "no-device", remaining,
+                    last_state, sizeof(last_state), &last_count);
+        continue;
+      }
       struct input_event events[32];
       ssize_t bytes = read(device->fd, events, sizeof(events));
       if (bytes <= 0)
@@ -344,6 +395,10 @@ static void usage(FILE *stream, const char *program) {
 
 int main(int argc, char **argv) {
   bool list = false;
+  bool session_fds = false;
+  int inherited_fds[MAX_DEVICES];
+  int inherited_count = 0;
+  int close_fd = -1;
   const char *selected_name = NULL;
 
   for (int i = 1; i < argc; ++i) {
@@ -351,10 +406,31 @@ int main(int argc, char **argv) {
       list = true;
     } else if (strcmp(argv[i], "--watch") == 0) {
       continue;
+    } else if (strcmp(argv[i], "--session-fds") == 0) {
+      session_fds = true;
+    } else if (strcmp(argv[i], "--fd") == 0 && i + 1 < argc) {
+      char *end = NULL;
+      errno = 0;
+      long parsed_fd = strtol(argv[++i], &end, 10);
+      if (errno != 0 || !end || *end != '\0' || parsed_fd < 3 ||
+          inherited_count >= MAX_DEVICES) {
+        fputs("Invalid inherited input descriptor.\n", stderr);
+        return 2;
+      }
+      inherited_fds[inherited_count++] = (int)parsed_fd;
+    } else if (strcmp(argv[i], "--close-fd") == 0 && i + 1 < argc) {
+      char *end = NULL;
+      errno = 0;
+      long parsed_fd = strtol(argv[++i], &end, 10);
+      if (errno != 0 || !end || *end != '\0' || parsed_fd < 3) {
+        fputs("Invalid helper descriptor.\n", stderr);
+        return 2;
+      }
+      close_fd = (int)parsed_fd;
     } else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
       selected_name = argv[++i];
     } else if (strcmp(argv[i], "--version") == 0) {
-      puts("bongo-input 1.0.0");
+      puts("bongo-input 1.2.0");
       return 0;
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       usage(stdout, argv[0]);
@@ -365,5 +441,21 @@ int main(int argc, char **argv) {
     }
   }
 
-  return list ? list_keyboards() : watch_keyboards(selected_name);
+  if (list && session_fds) {
+    fputs("--session-fds cannot be combined with --list.\n", stderr);
+    return 2;
+  }
+  if (!session_fds && inherited_count > 0) {
+    fputs("--fd requires --session-fds.\n", stderr);
+    return 2;
+  }
+  if (session_fds && !enter_session_mode())
+    return 1;
+  if (close_fd >= 0)
+    close(close_fd);
+
+  return list ? list_keyboards()
+              : watch_keyboards(selected_name,
+                                session_fds ? inherited_fds : NULL,
+                                session_fds ? inherited_count : -1);
 }
