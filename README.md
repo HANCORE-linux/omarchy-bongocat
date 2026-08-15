@@ -26,7 +26,7 @@ omarchy plugin add https://github.com/HANCORE-linux/omarchy-bongocat.git --enabl
 ## Update
 
 ```bash
-omarchy plugin update hancore.bongocat
+omarchy plugin update hancore.bongocat --yes && omarchy restart shell
 ```
 
 ## Removal
