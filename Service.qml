@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
@@ -43,6 +44,7 @@ Item {
   property int keypressDuration: 105
   property string keyboardName: ""
   property string monitorName: ""
+  property int workspaceId: 0
   property string colorMode: "default"
   property string customColor: "#f0abab"
   readonly property var idleService: shell && typeof shell.serviceFor === "function"
@@ -99,6 +101,7 @@ Item {
       keypressDuration: 105,
       keyboardName: "",
       monitorName: "",
+      workspaceId: 0,
       colorMode: "default",
       customColor: "#f0abab"
     }
@@ -141,6 +144,7 @@ Item {
     keypressDuration = intValue(next.keypressDuration, 105, 40, 500)
     keyboardName = String(next.keyboardName || "")
     monitorName = String(next.monitorName || "")
+    workspaceId = intValue(next.workspaceId, 0, 0, 10)
     var nextMode = String(next.colorMode || "default")
     colorMode = nextMode === "theme" || nextMode === "hex" ? nextMode : "default"
     var nextColor = String(next.customColor || "#f0abab")
@@ -404,6 +408,9 @@ Item {
   }
   function setKeyboardName(value) { patchSettings({ keyboardName: String(value || "") }) }
   function setMonitorName(value) { patchSettings({ monitorName: String(value || "") }) }
+  function setWorkspaceId(value) {
+    patchSettings({ workspaceId: intValue(value, 0, 0, 10) })
+  }
   function setColorMode(value) {
     var mode = String(value || "default")
     patchSettings({ colorMode: mode === "theme" || mode === "hex" ? mode : "default" })
@@ -426,6 +433,13 @@ Item {
   function screenEnabled(screenObject) {
     var target = targetScreen()
     return target !== null && target === screenObject
+  }
+
+  function workspaceEnabled(screenObject) {
+    if (workspaceId === 0) return true
+    var monitor = screenObject ? Hyprland.monitorFor(screenObject) : null
+    var active = monitor ? monitor.activeWorkspace : Hyprland.focusedWorkspace
+    return active !== null && active !== undefined && active.id === workspaceId
   }
 
   function resolvedX(screenObject) {
@@ -781,6 +795,7 @@ Item {
     function lock(): void { root.setPositionLocked(true) }
     function unlock(): void { root.setPositionLocked(false) }
     function resize(width: int): void { root.setCatWidth(width) }
+    function workspace(id: int): void { root.setWorkspaceId(id) }
     function test(): void { root.testAnimation() }
     function rescan(): void { root.scanDevices(); root.updateInputProcess() }
     function allowInput(): void { root.setInputAccess(true) }
@@ -793,7 +808,8 @@ Item {
         keyboards: root.inputCount,
         x: root.positionX,
         y: root.positionY,
-        width: root.catWidth
+        width: root.catWidth,
+        workspace: root.workspaceId
       })
     }
   }
@@ -810,6 +826,7 @@ Item {
         screen: screenScope.modelData
         visible: root.catVisible && root.positionLocked
           && root.screenEnabled(screenScope.modelData)
+          && root.workspaceEnabled(screenScope.modelData)
         color: "transparent"
         implicitWidth: root.catWidth
         implicitHeight: root.catHeight
@@ -845,6 +862,7 @@ Item {
         screen: screenScope.modelData
         visible: root.catVisible && !root.positionLocked
           && root.screenEnabled(screenScope.modelData)
+          && root.workspaceEnabled(screenScope.modelData)
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         anchors { top: true; bottom: true; left: true; right: true }

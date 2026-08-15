@@ -777,6 +777,62 @@ Panel {
             }
           }
 
+          Column {
+            width: parent.width
+            spacing: Style.spacing.labelGap
+
+            FieldLabel {
+              text: "Show in Workspace"
+            }
+
+            Row {
+              id: workspaceChoices
+              width: parent.width
+              height: Style.spacing.controlHeight
+              spacing: Style.space(4)
+              readonly property real allWidth: Style.space(44)
+              readonly property real workspaceWidth:
+                (width - allWidth - spacing * 10) / 10
+
+              Button {
+                width: workspaceChoices.allWidth
+                height: workspaceChoices.height
+                text: "All"
+                active: root.bongo && root.bongo.workspaceId === 0
+                bordered: true
+                focusable: true
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onClicked: if (root.bongo) root.bongo.setWorkspaceId(0)
+              }
+
+              Repeater {
+                model: 10
+
+                Button {
+                  required property int index
+                  readonly property int workspaceNumber: index + 1
+
+                  width: workspaceChoices.workspaceWidth
+                  height: workspaceChoices.height
+                  text: String(workspaceNumber)
+                  active: root.bongo
+                    && root.bongo.workspaceId === workspaceNumber
+                  bordered: true
+                  focusable: true
+                  foreground: root.foreground
+                  background: root.background
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onClicked: if (root.bongo)
+                    root.bongo.setWorkspaceId(workspaceNumber)
+                }
+              }
+            }
+          }
+
           PanelSeparator { width: parent.width; foreground: root.foreground }
           Row {
             width: parent.width

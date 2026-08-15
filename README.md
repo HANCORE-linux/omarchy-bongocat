@@ -50,6 +50,7 @@ privileged cleanup is required.
   Reset remain available.
 - Set the width from 60 to 640 px; 60 px fits the cat on the bar.
 - Choose `Default`, `Theme`, or a custom `#RRGGBB` color.
+- Show the cat on all workspaces or only on one selected workspace.
 - In the open panel, press `P` to lock or unlock, `T` to test, or use the arrow
   keys to move the cat by 10 px.
 

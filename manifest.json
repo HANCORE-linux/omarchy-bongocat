@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "hancore.bongocat",
   "name": "Bongo Cat",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": "HANCORE",
   "license": "MIT",
-  "description": "A native Quickshell Bongo Cat with automatic keyboard detection, source-only session input access, and lockable drag positioning.",
+  "description": "A native Quickshell Bongo Cat with session input access, workspace visibility, and lockable drag positioning.",
   "keywords": ["bongocat", "keyboard", "overlay", "quickshell", "quattro"],
   "kinds": ["bar-widget", "service"],
   "keepLoaded": true,
@@ -28,6 +28,7 @@
       "keypressDuration": 105,
       "keyboardName": "",
       "monitorName": "",
+      "workspaceId": 0,
       "colorMode": "default",
       "customColor": "#f0abab"
     },
@@ -77,6 +78,14 @@
         "max": 500,
         "step": 5,
         "defaultValue": 105
+      },
+      {
+        "key": "workspaceId",
+        "type": "integer",
+        "label": "Workspace (0 for all)",
+        "min": 0,
+        "max": 10,
+        "defaultValue": 0
       }
     ]
   }
