@@ -6,6 +6,12 @@ A lightweight native Quickshell plugin with no AUR package and no separate
 `wayland-bongocat` process. Quickshell renders the cat while a small local C
 helper emits only `L` or `R` paw events.
 
+## Installation
+
+```bash
+omarchy plugin add https://github.com/HANCORE-linux/omarchy-bongocat.git --enable
+```
+
 ## Controls
 
 - Left-click the bar icon to open the settings panel.
