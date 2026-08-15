@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+rule_file=/etc/udev/rules.d/70-omarchy-bongocat-uaccess.rules
+expected_rule='# Omarchy Bongo Cat: grant raw keyboard access to the active local seat user.
+# WARNING: every process of that active user can then read keyboard events.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"'
+
+action=${1:-}
+case "$action" in
+  status)
+    [[ -f $rule_file ]] && cmp -s -- "$rule_file" <(printf '%s\n' "$expected_rule")
+    exit
+    ;;
+  install|remove) ;;
+  *) echo "Usage: $0 <status|install|remove>" >&2; exit 2 ;;
+esac
+
+# Pass the complete root program as an already-materialized argument to the
+# root-owned shell. Unlike executing a helper from ~/.config after the Polkit
+# prompt, this has no user-writable executable that can be swapped mid-prompt.
+root_program=$(cat <<'ROOT_PROGRAM'
+set -euo pipefail
+
+rule_file=/etc/udev/rules.d/70-omarchy-bongocat-uaccess.rules
+action=${1:-}
+target_uid=${2:-}
+expected_rule='# Omarchy Bongo Cat: grant raw keyboard access to the active local seat user.
+# WARNING: every process of that active user can then read keyboard events.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"'
+
+if (( EUID != 0 )); then
+  echo "This command must run as root." >&2
+  exit 1
+fi
+if [[ ! $target_uid =~ ^[0-9]+$ ]] || (( target_uid < 1000 )) \
+    || ! getent passwd "$target_uid" >/dev/null; then
+  echo "Invalid desktop user id." >&2
+  exit 2
+fi
+
+rule_is_expected() {
+  [[ -f $rule_file ]] && cmp -s -- "$rule_file" \
+    <(printf '%s\n' "$expected_rule")
+}
+
+reload_input_rules() {
+  udevadm control --reload-rules
+  udevadm trigger --subsystem-match=input --sysname-match='event*' --action=change
+  udevadm settle
+}
+
+keyboard_events() {
+  local device
+  for device in /dev/input/event*; do
+    [[ -e $device ]] || continue
+    if udevadm info --query=property --name="$device" 2>/dev/null \
+        | grep -qx 'ID_INPUT_KEYBOARD=1'; then
+      printf '%s\n' "$device"
+    fi
+  done
+}
+
+clear_unmanaged_keyboard_acls() {
+  command -v setfacl >/dev/null 2>&1 || return 0
+  local device properties
+  while IFS= read -r device; do
+    properties=$(udevadm info --query=property --name="$device" 2>/dev/null || true)
+    # Keep ACLs that are still backed by another installed uaccess policy,
+    # such as the stock joystick rule on a composite input device.
+    if grep -Eq '^(CURRENT_TAGS|TAGS)=.*:uaccess:' <<<"$properties"; then
+      continue
+    fi
+    setfacl -x "u:${target_uid}" "$device" 2>/dev/null || true
+  done < <(keyboard_events)
+}
+
+case "$action" in
+  install)
+    if [[ -e $rule_file ]] && ! rule_is_expected; then
+      echo "Refusing to overwrite an unrelated udev rule: $rule_file" >&2
+      exit 1
+    fi
+    had_rule=false
+    [[ -e $rule_file ]] && had_rule=true
+    if [[ $had_rule == false ]]; then
+      install -d -m 0755 /etc/udev/rules.d
+      temporary=$(mktemp /etc/udev/rules.d/.bongocat-uaccess.XXXXXX)
+      trap 'rm -f -- "$temporary"' EXIT
+      printf '%s\n' "$expected_rule" >"$temporary"
+      chmod 0644 "$temporary"
+      mv -f -- "$temporary" "$rule_file"
+      trap - EXIT
+    fi
+    if ! reload_input_rules; then
+      if [[ $had_rule == false ]]; then
+        rm -f -- "$rule_file"
+        udevadm control --reload-rules || true
+        udevadm trigger --subsystem-match=input --sysname-match='event*' \
+          --action=change || true
+        udevadm settle || true
+        clear_unmanaged_keyboard_acls
+      fi
+      exit 1
+    fi
+    ;;
+  remove)
+    if [[ ! -e $rule_file ]]; then
+      exit 0
+    fi
+    if ! rule_is_expected; then
+      echo "Refusing to remove an unrelated udev rule: $rule_file" >&2
+      exit 1
+    fi
+    backup=$(mktemp)
+    cp -- "$rule_file" "$backup"
+    rm -f -- "$rule_file"
+    if ! reload_input_rules; then
+      install -m 0644 "$backup" "$rule_file"
+      rm -f -- "$backup"
+      udevadm control --reload-rules || true
+      udevadm trigger --subsystem-match=input --sysname-match='event*' \
+        --action=change || true
+      udevadm settle || true
+      exit 1
+    fi
+    rm -f -- "$backup"
+
+    # A removed uaccess tag does not reliably clear an ACL already attached to
+    # a live device. Remove this user's ACL only where no other uaccess policy
+    # still owns it. Already-open descriptors require logout/replug to revoke.
+    clear_unmanaged_keyboard_acls
+    ;;
+  *)
+    echo "Invalid action." >&2
+    exit 2
+    ;;
+esac
+ROOT_PROGRAM
+)
+
+exec pkexec /usr/bin/bash -c "$root_program" bongocat-input-access \
+  "$action" "$(id -u)"

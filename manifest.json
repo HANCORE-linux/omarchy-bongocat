@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "id": "hancore.bongocat",
+  "name": "Bongo Cat",
+  "version": "0.1.0",
+  "author": "HANCORE",
+  "license": "MIT",
+  "description": "A lightweight native Quickshell Bongo Cat with automatic keyboard detection, a bar panel, and lockable drag positioning.",
+  "keywords": ["bongocat", "keyboard", "overlay", "quickshell", "quattro"],
+  "kinds": ["bar-widget", "service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Bongo Cat",
+    "description": "Keyboard-reactive cat overlay with settings and position lock",
+    "category": "Fun",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "defaults": {
+      "active": true,
+      "positionLocked": true,
+      "positionX": -1,
+      "positionY": -1,
+      "catWidth": 280,
+      "keypressDuration": 105,
+      "keyboardName": "",
+      "monitorName": ""
+    },
+    "schema": [
+      {
+        "key": "active",
+        "type": "boolean",
+        "label": "Bongo Cat active",
+        "defaultValue": true
+      },
+      {
+        "key": "positionLocked",
+        "type": "boolean",
+        "label": "Lock position",
+        "defaultValue": true
+      },
+      {
+        "key": "positionX",
+        "type": "integer",
+        "label": "X position (-1 for automatic)",
+        "min": -1,
+        "max": 16000,
+        "defaultValue": -1
+      },
+      {
+        "key": "positionY",
+        "type": "integer",
+        "label": "Y position (-1 for automatic)",
+        "min": -1,
+        "max": 16000,
+        "defaultValue": -1
+      },
+      {
+        "key": "catWidth",
+        "type": "integer",
+        "label": "Cat width (pixels)",
+        "min": 120,
+        "max": 640,
+        "step": 10,
+        "defaultValue": 280
+      },
+      {
+        "key": "keypressDuration",
+        "type": "integer",
+        "label": "Paw duration (milliseconds)",
+        "min": 40,
+        "max": 500,
+        "step": 5,
+        "defaultValue": 105
+      }
+    ]
+  }
+}
