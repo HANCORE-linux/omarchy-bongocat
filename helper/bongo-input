@@ -25,16 +25,11 @@ KEY_ENTER = 28
 KEY_SPACE = 57
 INPUT_EVENT = struct.Struct("@llHHi")
 
+# Byte-for-byte frame parity is paired with upstream's hand mapping: this
+# explicit set selects left and every other pressed key selects right.
 LEFT_KEYS = frozenset(
     [1, 2, 3, 4, 5, 6, 7, 15, 16, 17, 18, 19, 20, 29, 30, 31, 32, 33,
-     34, 41, 42, 44, 45, 46, 47, 48, 56, 58, 59, 60, 61, 62, 63, 125]
-)
-RIGHT_KEYS = frozenset(
-    [8, 9, 10, 11, 12, 13, 14, 21, 22, 23, 24, 25, 26, 27, 28, 35,
-     36, 37, 38, 39, 40, 49, 50, 51, 52, 53, 54, 55, 57, 64, 65, 66,
-     67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
-     83, 86, 87, 88, 96, 97, 98, 99, 100, 102, 103, 104, 105, 106,
-     107, 108, 109, 110, 111, 119, 126, 127]
+     34, 41, 42, 44, 45, 46, 47, 48, 56, 58, 125]
 )
 POINTER_MARKERS = (
     "mouse",
@@ -132,11 +127,7 @@ def emit_status(state: str, count: int, previous: tuple[str, int] | None) -> tup
 
 
 def paw_for_key(keycode: int) -> str:
-    if keycode in LEFT_KEYS:
-        return "L"
-    if keycode in RIGHT_KEYS:
-        return "R"
-    return ""
+    return "L" if keycode in LEFT_KEYS else "R"
 
 
 def harden_session() -> int:

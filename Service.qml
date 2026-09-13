@@ -6,6 +6,8 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import "PrivacyState.js" as PrivacyState
+import "SettingsAdapter.js" as SettingsAdapter
 
 Item {
   id: root
@@ -14,8 +16,8 @@ Item {
   property var manifest: null
 
   readonly property string moduleName: "hancore.bongocat"
-  readonly property string home: Quickshell.env("HOME")
   readonly property string runtimeHome: Quickshell.env("XDG_RUNTIME_DIR")
+  readonly property string runtimeInstanceId: String(Quickshell.instanceId || "")
   readonly property string helperPath: localPath("helper/bongo-input")
   readonly property string accessScript: localPath("helper/input-access")
   readonly property string pendingSettingsPath: runtimeHome
@@ -26,6 +28,8 @@ Item {
   property bool settingsDirty: false
   property var pendingSettingKeys: ({})
   property var pendingRecoveryPatch: ({})
+  property var journalSettingKeys: ({})
+  property string pendingJournalInstanceId: ""
   property bool pendingJournalLoaded: false
   property bool persistVerificationPending: false
   property var persistVerificationPatch: ({})
@@ -41,26 +45,30 @@ Item {
   readonly property int catHeight: Math.max(1, Math.round(catWidth * 360 / 864))
   // All animation frames reserve 15 source pixels above the visible cat.
   readonly property int frameTopInset: Math.max(0, Math.round(catHeight * 15 / 360))
-  property int keypressDuration: 105
+  property int keypressDuration: 100
   property string keyboardName: ""
   property string monitorName: ""
   property int workspaceId: 0
   property string colorMode: "default"
   property string customColor: "#f0abab"
-  readonly property var idleService: shell && typeof shell.serviceFor === "function"
-    ? shell.serviceFor("omarchy.idle") : null
-  readonly property var lockService: shell && typeof shell.serviceFor === "function"
-    ? shell.serviceFor("omarchy.lock") : null
+  readonly property string screensaverClass: "org.omarchy.screensaver"
+  property var modelScreensaverWindows: ({})
+  property int modelScreensaverWindowCount: 0
+  property var eventScreensaverWindows: ({})
+  property int eventScreensaverWindowCount: 0
+  // Omarchy 4.0.3 does not expose idle/lock service objects to third-party
+  // services. Track the public Hyprland toplevel model instead, including its
+  // initial contents and reconnect-driven replacements. Session-lock surfaces
+  // are compositor-exclusive; the ordinary bar-off preference is unrelated.
   readonly property bool presentationSuppressed:
-    (idleService && idleService.screensaverWindowCount > 0)
-    || (lockService && lockService.locked)
+    modelScreensaverWindowCount > 0 || eventScreensaverWindowCount > 0
   readonly property bool catVisible: catActive && !presentationSuppressed
   readonly property bool catColorized: colorMode !== "default"
   readonly property color catTint: colorMode === "theme"
     ? Color.accent : customColor
 
-  property bool leftDown: false
-  property bool rightDown: false
+  property alias leftDown: pawAnimator.leftDown
+  property alias rightDown: pawAnimator.rightDown
   readonly property bool helperReady: true
   property string inputState: "scanning"
   property int inputCount: 0
@@ -72,12 +80,9 @@ Item {
   property string accessError: ""
   property bool inputStopRequested: false
   property int inputFailureCount: 0
+  property bool runtimeStarted: false
 
-  readonly property string frameFile: leftDown && rightDown
-    ? "bongo-cat-both-down.png"
-    : leftDown ? "bongo-cat-left-down.png"
-    : rightDown ? "bongo-cat-right-down.png"
-    : "bongo-cat-both-up.png"
+  readonly property string frameFile: pawAnimator.frameFile
   readonly property url frameSource: Qt.resolvedUrl("assets/" + frameFile)
   readonly property url idleSource: Qt.resolvedUrl("assets/bongo-cat-both-up.png")
   readonly property bool inputReady: inputState === "ready"
@@ -98,7 +103,7 @@ Item {
       positionX: -1,
       positionY: -1,
       catWidth: 280,
-      keypressDuration: 105,
+      keypressDuration: 100,
       keyboardName: "",
       monitorName: "",
       workspaceId: 0,
@@ -124,7 +129,8 @@ Item {
     var merged = defaults()
     if (settings) {
       for (var key in settings) {
-        if (key !== "id") merged[key] = settings[key]
+        if (key !== "id" && key !== "__proto__" && key !== "constructor"
+            && key !== "prototype") merged[key] = settings[key]
       }
     }
     return merged
@@ -135,13 +141,12 @@ Item {
     var oldActive = catActive
     var oldKeyboard = keyboardName
 
-    pluginSettings = next
     catActive = boolValue(next.active, true)
     positionLocked = boolValue(next.positionLocked, true)
     positionX = intValue(next.positionX, -1, -1, 16000)
     positionY = intValue(next.positionY, -1, -1, 16000)
     catWidth = intValue(next.catWidth, 280, minimumCatWidth, maximumCatWidth)
-    keypressDuration = intValue(next.keypressDuration, 105, 40, 500)
+    keypressDuration = intValue(next.keypressDuration, 100, 10, 5000)
     keyboardName = String(next.keyboardName || "")
     monitorName = String(next.monitorName || "")
     workspaceId = intValue(next.workspaceId, 0, 0, 10)
@@ -150,63 +155,47 @@ Item {
     var nextColor = String(next.customColor || "#f0abab")
     customColor = /^#[0-9a-fA-F]{6}$/.test(nextColor) ? nextColor : "#f0abab"
 
-    if (oldActive !== catActive || oldKeyboard !== keyboardName)
+    // Keep the persisted snapshot canonical while preserving ordinary
+    // host-owned entry metadata such as Shibumi's module marker.
+    next.active = catActive
+    next.positionLocked = positionLocked
+    next.positionX = positionX
+    next.positionY = positionY
+    next.catWidth = catWidth
+    next.keypressDuration = keypressDuration
+    next.keyboardName = keyboardName
+    next.monitorName = monitorName
+    next.workspaceId = workspaceId
+    next.colorMode = colorMode
+    next.customColor = customColor
+    pluginSettings = next
+
+    if (runtimeStarted && (oldActive !== catActive || oldKeyboard !== keyboardName))
       updateInputProcess()
   }
 
   function settingsFromConfig(config) {
-    if (!config || !config.bar || !config.bar.layout) return null
-    var sections = ["left", "center", "right"]
-    for (var s = 0; s < sections.length; ++s) {
-      var entries = config.bar.layout[sections[s]]
-      if (!Array.isArray(entries)) continue
-      for (var i = 0; i < entries.length; ++i) {
-        if (entries[i] && String(entries[i].id || "") === moduleName)
-          return entries[i]
-      }
-    }
-    if (Array.isArray(config.plugins)) {
-      for (var p = 0; p < config.plugins.length; ++p) {
-        if (config.plugins[p] && String(config.plugins[p].id || "") === moduleName)
-          return config.plugins[p]
-      }
-    }
-    return null
+    return SettingsAdapter.settingsFor(config, moduleName)
   }
 
   function settingsFromShell() {
-    return shell ? settingsFromConfig(shell.shellConfig) : null
-  }
-
-  function shellConfigFromDisk() {
-    if (!shell || String(shell.userConfigPath || "") === "") return null
-    shellConfigProbe.reload()
-    try {
-      return JSON.parse(String(shellConfigProbe.text()))
-    } catch (error) {
-      console.warn("Bongo Cat could not read the latest shell settings")
-      return null
-    }
-  }
-
-  function configWithSettings(config, settings) {
-    var nextConfig = JSON.parse(JSON.stringify(config))
-    var entry = settingsFromConfig(nextConfig)
-    if (!entry) return null
-    for (var oldKey in entry) {
-      if (oldKey !== "id") delete entry[oldKey]
-    }
-    entry.id = moduleName
-    for (var key in settings) {
-      if (key !== "id") entry[key] = settings[key]
-    }
-    return nextConfig
+    if (!shell) return null
+    if ("barConfig" in shell && shell.barConfig)
+      return settingsFromConfig(shell.barConfig)
+    // Compatibility with older trusted hosts that injected the full config.
+    return "shellConfig" in shell && shell.shellConfig
+      ? settingsFromConfig(shell.shellConfig) : null
   }
 
   function syncFromShell() {
     if (panelSessionCount > 0 || settingsDirty || persistVerificationPending) return
     var found = settingsFromShell()
-    if (found) applySettings(found)
+    if (!found) return
+    applySettings(found)
+    // An accepted host mutation is only an in-memory acknowledgement. Keep
+    // the recovery journal current until another Quickshell incarnation has
+    // proved that the values reached shell.json.
+    if (Object.keys(journalSettingKeys).length > 0) writePendingJournal()
   }
 
   function beginPanelSession() {
@@ -227,27 +216,34 @@ Item {
   }
 
   function writePendingJournal() {
-    if (!settingsDirty) return
-    var values = ({})
-    for (var key in pendingSettingKeys) {
-      if (pendingSettingKeys[key]) values[key] = pluginSettings[key]
-    }
-    pendingSettingsFile.setText(JSON.stringify({ version: 1, settings: values }) + "\n")
+    // During a panel session, historical journal keys must still follow newer
+    // host updates. Only currently dirty or in-flight keys belong to local
+    // state; otherwise crash recovery could roll an external write back.
+    var hostSettings = settingsFromShell()
+    var canonicalHost = hostSettings ? mergedSettings(hostSettings) : null
+    var values = SettingsAdapter.journalValues(pluginSettings,
+      canonicalHost, journalSettingKeys, pendingSettingKeys,
+      persistVerificationPatch)
+    if (Object.keys(values).length === 0) return
+    pendingJournalInstanceId = runtimeInstanceId
+    pendingSettingsFile.setText(JSON.stringify({
+      version: 2,
+      instanceId: runtimeInstanceId,
+      settings: values
+    }) + "\n")
   }
 
   function clearPendingJournal() {
+    pendingJournalInstanceId = ""
+    pendingRecoveryPatch = ({})
+    pendingSettingKeys = ({})
+    journalSettingKeys = ({})
     pendingSettingsFile.setText("")
   }
 
-  function verifyPersistedSettings(raw) {
+  function verifyPersistedSettings() {
     if (!persistVerificationPending) return
-    var config = null
-    try {
-      config = JSON.parse(String(raw || ""))
-    } catch (error) {
-      return
-    }
-    var stored = settingsFromConfig(config)
+    var stored = settingsFromShell()
     if (!stored) return
     var keys = Object.keys(persistVerificationPatch)
     for (var i = 0; i < keys.length; ++i) {
@@ -264,9 +260,11 @@ Item {
     persistenceVerificationTimer.stop()
     if (settingsDirty) {
       writePendingJournal()
+      Qt.callLater(persistPendingSettings)
     } else {
-      pendingSettingKeys = ({})
-      clearPendingJournal()
+      // Do not clear on barConfigChanged: Omarchy publishes that in-memory
+      // snapshot before its asynchronous FileView write reaches disk.
+      writePendingJournal()
       syncFromShell()
     }
   }
@@ -295,10 +293,21 @@ Item {
     if (text === "") return
     try {
       var parsed = JSON.parse(text)
-      if (parsed && parsed.version === 1 && parsed.settings
-          && typeof parsed.settings === "object") {
-        pendingRecoveryPatch = parsed.settings
-        recoverPendingJournal()
+      if (parsed && (parsed.version === 1 || parsed.version === 2)
+          && parsed.settings && typeof parsed.settings === "object"
+          && !Array.isArray(parsed.settings)) {
+        var recovered = ({})
+        var allowed = Object.keys(defaults())
+        var keys = Object.keys(parsed.settings)
+        for (var i = 0; i < keys.length; ++i) {
+          var key = keys[i]
+          if (allowed.indexOf(key) !== -1) recovered[key] = parsed.settings[key]
+        }
+        pendingJournalInstanceId = parsed.version === 2
+          ? String(parsed.instanceId || "") : ""
+        pendingRecoveryPatch = recovered
+        if (Object.keys(recovered).length > 0) recoverPendingJournal()
+        else clearPendingJournal()
       } else {
         clearPendingJournal()
       }
@@ -314,12 +323,18 @@ Item {
     if (keys.length === 0) return
     var shellSettings = settingsFromShell()
     if (!shellSettings) return
+    if (SettingsAdapter.journalIsDurable(pendingJournalInstanceId,
+        runtimeInstanceId, shellSettings, pendingRecoveryPatch)) {
+      clearPendingJournal()
+      return
+    }
 
     var latest = mergedSettings(shellSettings)
     var modified = ({})
+    var allowed = Object.keys(defaults())
     for (var i = 0; i < keys.length; ++i) {
       var key = keys[i]
-      if (!(key in defaults())) continue
+      if (allowed.indexOf(key) === -1) continue
       latest[key] = pendingRecoveryPatch[key]
       modified[key] = true
     }
@@ -331,6 +346,7 @@ Item {
     }
     applySettings(latest)
     pendingSettingKeys = modified
+    journalSettingKeys = modified
     settingsDirty = true
     persistPendingSettings()
   }
@@ -338,39 +354,37 @@ Item {
   function persistPendingSettings() {
     if (!settingsDirty) return
     writePendingJournal()
-    if (!shell || typeof shell.persistShellConfig !== "function") {
+    if (persistVerificationPending) return
+    if (!shell || typeof shell.updateEntryInline !== "function") {
       persistenceRetryTimer.restart()
       return
     }
-    var diskConfig = shellConfigFromDisk()
-    var diskSettings = settingsFromConfig(diskConfig)
-    if (!diskSettings) {
+    var shellSettings = settingsFromShell()
+    if (!shellSettings) {
       persistenceRetryTimer.restart()
       return
     }
 
     var local = mergedSettings(pluginSettings)
-    var latest = mergedSettings(diskSettings)
+    var latest = SettingsAdapter.mergeDirtySettings(
+      mergedSettings(shellSettings), local, pendingSettingKeys)
     var verification = ({})
     for (var key in pendingSettingKeys) {
-      if (!pendingSettingKeys[key]) continue
-      latest[key] = local[key]
-      verification[key] = local[key]
-    }
-    var nextConfig = configWithSettings(diskConfig, latest)
-    if (!nextConfig) {
-      persistenceRetryTimer.restart()
-      return
+      if (pendingSettingKeys[key]) verification[key] = local[key]
     }
 
     applySettings(latest)
+    pendingSettingKeys = ({})
     settingsDirty = false
     persistVerificationPatch = verification
     persistVerificationPending = true
     persistVerificationAttempts = 0
     try {
-      shell.persistShellConfig(nextConfig)
-      persistenceVerificationTimer.restart()
+      // This is the scoped Omarchy 4.0.3 persistence API. It accepts only the
+      // calling plugin's entry and keeps unrelated shell.json fields intact.
+      shell.updateEntryInline(moduleName, latest)
+      Qt.callLater(verifyPersistedSettings)
+      if (persistVerificationPending) persistenceVerificationTimer.restart()
     } catch (error) {
       console.warn("Bongo Cat could not persist shell settings")
       retryUnverifiedPersistence()
@@ -379,17 +393,45 @@ Item {
 
   function patchSettings(patch) {
     var next = mergedSettings(pluginSettings)
-    var modified = ({})
-    for (var key in pendingSettingKeys) modified[key] = pendingSettingKeys[key]
+    var dirty = ({})
+    var journal = ({})
+    var allowed = Object.keys(defaults())
+    for (var key in pendingSettingKeys) dirty[key] = pendingSettingKeys[key]
+    for (var journalKey in journalSettingKeys)
+      journal[journalKey] = journalSettingKeys[journalKey]
     for (var patchKey in patch) {
+      if (allowed.indexOf(patchKey) === -1) continue
       next[patchKey] = patch[patchKey]
-      modified[patchKey] = true
+      dirty[patchKey] = true
+      journal[patchKey] = true
     }
     applySettings(next)
-    pendingSettingKeys = modified
+    pendingSettingKeys = dirty
+    journalSettingKeys = journal
     settingsDirty = true
-    if (panelSessionCount > 0) writePendingJournal()
+    if (panelSessionCount > 0 || persistVerificationPending) writePendingJournal()
     else persistPendingSettings()
+  }
+
+  function applyIpcSettings(rawPatch) {
+    var text = String(rawPatch || "")
+    if (text.length === 0 || text.length > 4096) return false
+    try {
+      var parsed = JSON.parse(text)
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false
+      var allowed = Object.keys(defaults())
+      var keys = Object.keys(parsed)
+      var accepted = ({})
+      for (var i = 0; i < keys.length; ++i) {
+        var key = keys[i]
+        if (allowed.indexOf(key) !== -1) accepted[key] = parsed[key]
+      }
+      if (Object.keys(accepted).length === 0) return false
+      patchSettings(accepted)
+      return true
+    } catch (error) {
+      return false
+    }
   }
 
   function setCatActive(value) { patchSettings({ active: !!value }) }
@@ -404,7 +446,7 @@ Item {
   }
   function resizeCat(delta) { setCatWidth(catWidth + delta) }
   function setKeypressDuration(value) {
-    patchSettings({ keypressDuration: intValue(value, 105, 40, 500) })
+    patchSettings({ keypressDuration: intValue(value, 100, 10, 5000) })
   }
   function setKeyboardName(value) { patchSettings({ keyboardName: String(value || "") }) }
   function setMonitorName(value) { patchSettings({ monitorName: String(value || "") }) }
@@ -419,6 +461,37 @@ Item {
     var next = String(value || "")
     if (/^#[0-9a-fA-F]{6}$/.test(next))
       patchSettings({ customColor: next, colorMode: "hex" })
+  }
+
+  function refreshPresentationSuppression() {
+    var toplevels = Hyprland.toplevels ? Hyprland.toplevels.values : []
+    var snapshot = PrivacyState.matchingToplevels(toplevels || [], screensaverClass)
+    modelScreensaverWindows = snapshot.windows
+    modelScreensaverWindowCount = snapshot.count
+    // Once the authoritative model has observed a raw-open address, it owns
+    // that lifetime. Until then, retain the event entry across stale snapshots.
+    var unconfirmed = PrivacyState.withoutConfirmedWindows(
+      eventScreensaverWindows, snapshot.windows)
+    eventScreensaverWindows = unconfirmed.windows
+    eventScreensaverWindowCount = unconfirmed.count
+  }
+
+  function setScreensaverWindow(address, visible) {
+    var next = PrivacyState.windowsAfter(eventScreensaverWindows, address, visible)
+    eventScreensaverWindows = next.windows
+    eventScreensaverWindowCount = next.count
+  }
+
+  function handleHyprlandEvent(event) {
+    var name = String(event && event.name ? event.name : "")
+    if (name === "openwindow") {
+      var opened = PrivacyState.eventParts(event, 4)
+      if (String(opened[2] || "") === screensaverClass)
+        setScreensaverWindow(opened[0], true)
+    } else if (name === "closewindow") {
+      var closed = PrivacyState.eventParts(event, 1)
+      setScreensaverWindow(closed[0], false)
+    }
   }
 
   function targetScreen() {
@@ -490,22 +563,9 @@ Item {
     patchSettings({ positionX: -1, positionY: -1 })
   }
 
-  function pressLeft() {
-    leftDown = true
-    leftRelease.interval = keypressDuration
-    leftRelease.restart()
-  }
-
-  function pressRight() {
-    rightDown = true
-    rightRelease.interval = keypressDuration
-    rightRelease.restart()
-  }
-
-  function testAnimation() {
-    pressLeft()
-    pressRight()
-  }
+  function pressLeft() { pawAnimator.pressLeft() }
+  function pressRight() { pawAnimator.pressRight() }
+  function testAnimation() { pawAnimator.testAnimation() }
 
   function handleInputLine(rawLine) {
     var line = String(rawLine || "").trim()
@@ -556,8 +616,7 @@ Item {
       }
       inputState = "disabled"
       inputCount = 0
-      leftDown = false
-      rightDown = false
+      pawAnimator.releaseAll()
       accessBusy = false
       return
     }
@@ -586,8 +645,7 @@ Item {
       sessionAccessGranted = false
       inputState = "permission"
       inputCount = 0
-      leftDown = false
-      rightDown = false
+      pawAnimator.releaseAll()
       if (accessError === "")
         accessError = exitCode === 126 || exitCode === 127
           ? "Input authorization was cancelled" : "Authorized input helper stopped"
@@ -657,6 +715,17 @@ Item {
     // Session access is represented by the lifetime of inputProcess only.
   }
 
+  function startRuntime() {
+    if (runtimeStarted) return
+    runtimeStarted = true
+    syncFromShell()
+    loadPendingJournal(pendingSettingsFile.text())
+    refreshPresentationSuppression()
+    scanDevices()
+    updateInputProcess()
+    checkInputAccess()
+  }
+
   function setInputAccess(allow) {
     if (accessBusy && allow) return
     accessError = ""
@@ -671,19 +740,37 @@ Item {
   }
 
   Connections {
+    target: Hyprland
+    function onRawEvent(event) { root.handleHyprlandEvent(event) }
+  }
+
+  Connections {
+    target: Hyprland.toplevels
+    function onValuesChanged() { presentationRefreshTimer.restart() }
+  }
+
+  Connections {
     target: root.shell
-    function onShellConfigChanged() {
+    ignoreUnknownSignals: true
+    function onBarConfigChanged() {
+      root.verifyPersistedSettings()
       root.syncFromShell()
       root.recoverPendingJournal()
+      root.writePendingJournal()
+    }
+    function onShellConfigChanged() {
+      root.verifyPersistedSettings()
+      root.syncFromShell()
+      root.recoverPendingJournal()
+      root.writePendingJournal()
     }
   }
 
   Component.onCompleted: {
     applySettings(defaults())
-    loadPendingJournal(pendingSettingsFile.text())
-    scanDevices()
-    updateInputProcess()
-    checkInputAccess()
+    // The host injects the scoped shell facade immediately after createObject.
+    // Defer side effects so persisted active:false is honored before scanning.
+    Qt.callLater(startRuntime)
   }
 
   FileView {
@@ -698,16 +785,11 @@ Item {
     onSaveFailed: console.warn("Bongo Cat could not save pending settings")
   }
 
-  FileView {
-    id: shellConfigProbe
-    path: root.shell ? root.shell.userConfigPath : ""
-    preload: false
-    blockLoading: true
-    blockAllReads: true
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.verifyPersistedSettings(text())
-    onFileChanged: reload()
+  Timer {
+    id: presentationRefreshTimer
+    interval: 100
+    repeat: false
+    onTriggered: root.refreshPresentationSuppression()
   }
 
   Timer {
@@ -716,8 +798,7 @@ Item {
     repeat: true
     onTriggered: {
       root.persistVerificationAttempts += 1
-      shellConfigProbe.reload()
-      root.verifyPersistedSettings(shellConfigProbe.text())
+      root.verifyPersistedSettings()
       if (root.persistVerificationPending
           && root.persistVerificationAttempts >= 20)
         root.retryUnverifiedPersistence()
@@ -743,16 +824,10 @@ Item {
     }
   }
 
-  Timer {
-    id: leftRelease
-    repeat: false
-    onTriggered: root.leftDown = false
-  }
-
-  Timer {
-    id: rightRelease
-    repeat: false
-    onTriggered: root.rightDown = false
+  PawAnimator {
+    id: pawAnimator
+    keypressDuration: root.keypressDuration
+    testAnimationDuration: 200
   }
 
   Timer {
@@ -800,16 +875,35 @@ Item {
     function rescan(): void { root.scanDevices(); root.updateInputProcess() }
     function allowInput(): void { root.setInputAccess(true) }
     function revokeInput(): void { root.setInputAccess(false) }
+    function configure(patchJson: string): bool {
+      return root.applyIpcSettings(patchJson)
+    }
+    function keyboards(): string { return JSON.stringify(root.keyboardOptions()) }
     function status(): string {
+      var screenObject = root.targetScreen()
       return JSON.stringify({
         active: root.catActive,
         locked: root.positionLocked,
         input: root.inputState,
         keyboards: root.inputCount,
-        x: root.positionX,
-        y: root.positionY,
+        keyboardName: root.keyboardName,
+        x: screenObject ? Math.round(root.resolvedX(screenObject))
+          : Math.max(0, root.positionX),
+        y: screenObject ? Math.round(root.resolvedY(screenObject))
+          : Math.max(0, root.positionY),
+        maxX: screenObject ? Math.max(0, screenObject.width - root.catWidth) : 16000,
+        maxY: screenObject ? Math.max(0, screenObject.height - root.catHeight) : 16000,
         width: root.catWidth,
-        workspace: root.workspaceId
+        duration: root.keypressDuration,
+        monitor: root.monitorName,
+        workspace: root.workspaceId,
+        colorMode: root.colorMode,
+        customColor: root.customColor,
+        presentationSuppressed: root.presentationSuppressed,
+        needsInputAccess: root.needsInputAccess,
+        accessInstalled: root.accessInstalled,
+        accessBusy: root.accessBusy,
+        accessError: root.accessError
       })
     }
   }

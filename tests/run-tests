@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$repo_dir"
+
+# These are the four exact upstream v2.0.2 animation frames. The red impact
+# strokes belong to the paw-down images; no procedural splash is layered on.
+sha256sum --check --status <<'EOF'
+5a3c636134cc58883ca1baf4fe40fb7f10da89495c4213cbb052c846c05df384  assets/bongo-cat-both-down.png
+a523fef392b9b2d15adaf6b609e7461c521accc7e4ddf555d4c3b5600f15215b  assets/bongo-cat-both-up.png
+886496bca6b52917aab517bd3379caae37c634579cc6aef9b753027830728d4e  assets/bongo-cat-left-down.png
+62a32bbc1e9428c2ff7eb53913e414afef994e96853851c9f5f4bbc4d10bf55f  assets/bongo-cat-right-down.png
+EOF
+python3 tests/test_bongo_input.py
+
+export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen}
+qml_test_runner=${QML_TEST_RUNNER:-/usr/lib/qt6/bin/qmltestrunner}
+exec "$qml_test_runner" -input "$repo_dir/tests" "$@"

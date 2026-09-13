@@ -2,8 +2,10 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "SettingsAdapter.js" as SettingsAdapter
 
 Panel {
   id: root
@@ -15,23 +17,56 @@ Panel {
   readonly property var bongo: bar && bar.shell
     && typeof bar.shell.serviceFor === "function"
     ? bar.shell.serviceFor(moduleName) : null
+  readonly property bool serviceAvailable: !!(bongo
+    && typeof bongo.setCatWidth === "function")
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color background: bar ? bar.background : Color.background
   readonly property color accent: bar ? bar.urgent : Color.accent
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.58)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property var activeScreen: bongo ? bongo.targetScreen() : null
-  readonly property int positionXValue: bongo && activeScreen
-    ? Math.round(bongo.resolvedX(activeScreen)) : 0
-  readonly property int positionYValue: bongo && activeScreen
-    ? Math.round(bongo.resolvedY(activeScreen)) : 0
-  readonly property int positionXMaximum: bongo && activeScreen
-    ? Math.max(0, activeScreen.width - bongo.catWidth) : 8000
-  readonly property int positionYMaximum: bongo && activeScreen
-    ? Math.max(0, activeScreen.height - bongo.catHeight) : 8000
-  readonly property bool presentationSuppressed: bongo
-    ? bongo.presentationSuppressed : false
+  readonly property var activeScreen: serviceAvailable ? bongo.targetScreen() : null
+  readonly property int positionXValue: serviceAvailable && activeScreen
+    ? Math.round(bongo.resolvedX(activeScreen))
+    : ipcStatusReady ? Number(ipcStatus.x) : Math.max(0, fallbackNumber("positionX", 0))
+  readonly property int positionYValue: serviceAvailable && activeScreen
+    ? Math.round(bongo.resolvedY(activeScreen))
+    : ipcStatusReady ? Number(ipcStatus.y) : Math.max(0, fallbackNumber("positionY", 0))
+  readonly property int positionXMaximum: serviceAvailable && activeScreen
+    ? Math.max(0, activeScreen.width - bongo.catWidth)
+    : ipcStatusReady ? Number(ipcStatus.maxX) : 8000
+  readonly property int positionYMaximum: serviceAvailable && activeScreen
+    ? Math.max(0, activeScreen.height - bongo.catHeight)
+    : ipcStatusReady ? Number(ipcStatus.maxY) : 8000
+  readonly property bool presentationSuppressed: serviceAvailable
+    ? bongo.presentationSuppressed : ipcStatus.presentationSuppressed === true
+  readonly property bool catOn: serviceAvailable
+    ? bongo.catActive : fallbackBool("active", true)
+  readonly property bool catLocked: serviceAvailable
+    ? bongo.positionLocked : fallbackBool("positionLocked", true)
+  readonly property int catSize: serviceAvailable
+    ? bongo.catWidth : fallbackNumber("catWidth", 280)
+  readonly property string catColorMode: serviceAvailable
+    ? bongo.colorMode : String(fallbackSetting("colorMode", "default"))
+  readonly property string catCustomColor: serviceAvailable
+    ? bongo.customColor : String(fallbackSetting("customColor", "#f0abab"))
+  readonly property int pawDuration: serviceAvailable
+    ? bongo.keypressDuration : fallbackNumber("keypressDuration", 100)
+  readonly property string selectedMonitor: serviceAvailable
+    ? bongo.monitorName : String(fallbackSetting("monitorName", ""))
+  readonly property string selectedKeyboard: serviceAvailable
+    ? bongo.keyboardName : String(fallbackSetting("keyboardName", ""))
+  readonly property int selectedWorkspace: serviceAvailable
+    ? bongo.workspaceId : fallbackNumber("workspaceId", 0)
+  readonly property bool positionControlsReady: catOn
+    && (serviceAvailable || ipcStatusReady)
   property var panelSessionService: null
+  property var localPatch: ({})
+  property var ipcStatus: ({})
+  property bool ipcStatusReady: false
+  property bool statusRefreshPending: false
+  property var ipcKeyboards: []
+  property var ipcActions: []
+  property string fallbackError: ""
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -39,9 +74,12 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       beginPanelSession()
-      if (bongo) {
+      if (serviceAvailable) {
         bongo.checkInputAccess()
         bongo.scanDevices()
+      } else {
+        requestStatus()
+        invokeIpc(["rescan"], true)
       }
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     } else {
@@ -50,11 +88,68 @@ Panel {
   }
 
   onBongoChanged: if (opened) beginPanelSession()
+  onSettingsChanged: {
+    localPatch = ({})
+    if (opened && !serviceAvailable) requestStatus()
+  }
   onPresentationSuppressedChanged: if (presentationSuppressed) close()
   Component.onDestruction: abandonPanelSession()
 
+  function fallbackSetting(key, fallback) {
+    if (localPatch && localPatch[key] !== undefined && localPatch[key] !== null)
+      return localPatch[key]
+    if (settings && settings[key] !== undefined && settings[key] !== null)
+      return settings[key]
+    return fallback
+  }
+
+  function fallbackBool(key, fallback) {
+    var value = fallbackSetting(key, fallback)
+    if (value === true || value === false) return value
+    var text = String(value).toLowerCase()
+    return text === "true" || text === "1" || text === "yes" || text === "on"
+  }
+
+  function fallbackNumber(key, fallback) {
+    var value = Number(fallbackSetting(key, fallback))
+    return isFinite(value) ? value : fallback
+  }
+
+  function persistFallback(patch) {
+    var previous = localPatch
+    var mergedPatch = SettingsAdapter.mergedEntry("", previous, null, patch)
+    delete mergedPatch.id
+    localPatch = mergedPatch
+
+    var host = bar && bar.shell
+    if (!host || typeof host.updateEntryInline !== "function") {
+      localPatch = previous
+      fallbackError = "This bar cannot save Bongo Cat settings"
+      return false
+    }
+    var entry = SettingsAdapter.mergedEntry(moduleName, settings, previous, patch)
+    var changed = JSON.stringify(entry) !== JSON.stringify(
+      SettingsAdapter.mergedEntry(moduleName, settings, null, null))
+    try {
+      var accepted = host.updateEntryInline(moduleName, entry)
+      if (changed && accepted !== true) {
+        localPatch = previous
+        fallbackError = "Bongo Cat settings were rejected by the bar"
+        return false
+      }
+      fallbackError = ""
+      if (changed) invokeIpc(["configure", JSON.stringify(patch)], false)
+      else statusRefreshTimer.restart()
+      return true
+    } catch (error) {
+      localPatch = previous
+      fallbackError = "Bongo Cat settings could not be saved"
+      return false
+    }
+  }
+
   function beginPanelSession() {
-    if (panelSessionService || !bongo
+    if (panelSessionService || !serviceAvailable
         || typeof bongo.beginPanelSession !== "function") return
     panelSessionService = bongo
     panelSessionService.beginPanelSession()
@@ -75,12 +170,238 @@ Panel {
   }
 
   function toggleActive() {
-    if (bongo) bongo.setCatActive(!bongo.catActive)
+    if (serviceAvailable) bongo.setCatActive(!bongo.catActive)
+    else persistFallback({ active: !catOn })
+  }
+
+  function applyPositionLocked(value) {
+    if (serviceAvailable) bongo.setPositionLocked(value)
+    else persistFallback({ positionLocked: !!value })
+  }
+
+  function applyCatWidth(value) {
+    var next = Math.max(60, Math.min(640, Math.round(Number(value) || 280)))
+    if (serviceAvailable) bongo.setCatWidth(next)
+    else persistFallback({ catWidth: next })
+  }
+
+  function previewCatWidth(value) {
+    var next = Math.max(60, Math.min(640, Math.round(Number(value) || 280)))
+    if (serviceAvailable) bongo.previewCatWidth(next)
+    else localPatch = SettingsAdapter.mergedEntry("", localPatch, null,
+      { catWidth: next })
+  }
+
+  function applyColorMode(value) {
+    if (serviceAvailable) bongo.setColorMode(value)
+    else persistFallback({ colorMode: String(value || "default") })
+  }
+
+  function applyCustomColor(value) {
+    if (serviceAvailable) bongo.setCustomColor(value)
+    else persistFallback({ customColor: value, colorMode: "hex" })
+  }
+
+  function applyPosition(x, y) {
+    var nx = Math.max(0, Math.min(positionXMaximum, Math.round(Number(x) || 0)))
+    var ny = Math.max(0, Math.min(positionYMaximum, Math.round(Number(y) || 0)))
+    if (serviceAvailable) bongo.setPosition(nx, ny)
+    else persistFallback({ positionX: nx, positionY: ny })
   }
 
   function moveFromPanel(dx, dy) {
-    if (!bongo) return
-    bongo.setPosition(positionXValue + dx, positionYValue + dy)
+    applyPosition(positionXValue + dx, positionYValue + dy)
+  }
+
+  function invokeIpc(args, refreshKeyboards) {
+    if (serviceAvailable) return
+    var next = ipcActions.slice()
+    next.push({ args: args, refreshKeyboards: refreshKeyboards === true })
+    ipcActions = next
+    runNextIpcAction()
+  }
+
+  function runNextIpcAction() {
+    if (serviceAvailable || ipcAction.running || ipcActions.length === 0) return
+    var next = ipcActions.slice()
+    var action = next.shift()
+    ipcActions = next
+    ipcAction.refreshKeyboards = action.refreshKeyboards
+    ipcAction.command = ["omarchy-shell", moduleName].concat(action.args)
+    ipcAction.running = true
+  }
+
+  function finishIpcAction(exitCode) {
+    if (exitCode !== 0) fallbackError = "Bongo Cat service is unavailable"
+    requestStatus()
+    if (ipcAction.refreshKeyboards) keyboardRefreshTimer.restart()
+    runNextIpcAction()
+  }
+
+  function requestStatus() {
+    if (serviceAvailable) return
+    if (ipcStatusQuery.running) {
+      statusRefreshPending = true
+      return
+    }
+    ipcStatusQuery.command = ["omarchy-shell", moduleName, "status"]
+    ipcStatusQuery.running = true
+  }
+
+  function finishStatusRequest(exitCode) {
+    if (exitCode !== 0) {
+      ipcStatusReady = false
+      fallbackError = "Bongo Cat service is unavailable"
+    }
+    if (statusRefreshPending) {
+      statusRefreshPending = false
+      Qt.callLater(requestStatus)
+    }
+  }
+
+  function requestKeyboards() {
+    if (serviceAvailable || ipcKeyboardsQuery.running) return
+    ipcKeyboardsQuery.command = ["omarchy-shell", moduleName, "keyboards"]
+    ipcKeyboardsQuery.running = true
+  }
+
+  function invalidateStatus() {
+    ipcStatus = ({})
+    ipcStatusReady = false
+    fallbackError = "Bongo Cat returned an invalid status"
+  }
+
+  function takeStatus(raw) {
+    try {
+      var parsed = JSON.parse(String(raw || ""))
+      var numericKeys = ["x", "y", "maxX", "maxY", "keyboards"]
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+          || typeof parsed.input !== "string"
+          || typeof parsed.presentationSuppressed !== "boolean"
+          || typeof parsed.needsInputAccess !== "boolean"
+          || typeof parsed.accessInstalled !== "boolean"
+          || typeof parsed.accessBusy !== "boolean") {
+        invalidateStatus()
+        return
+      }
+      for (var i = 0; i < numericKeys.length; ++i) {
+        var rawValue = parsed[numericKeys[i]]
+        var value = Number(rawValue)
+        if (typeof rawValue !== "number" || !isFinite(value) || value < 0) {
+          invalidateStatus()
+          return
+        }
+      }
+      ipcStatus = parsed
+      ipcStatusReady = true
+      fallbackError = ""
+    } catch (error) {
+      invalidateStatus()
+    }
+  }
+
+  function takeKeyboards(raw) {
+    try {
+      var parsed = JSON.parse(String(raw || "[]"))
+      if (!Array.isArray(parsed) || parsed.length > 512) {
+        ipcKeyboards = []
+        return
+      }
+      var sanitized = []
+      for (var i = 0; i < parsed.length; ++i) {
+        var option = parsed[i]
+        if (!option || typeof option !== "object" || Array.isArray(option)) continue
+        var value = String(option.value || "")
+        var label = String(option.label || "")
+        if (value.length <= 256 && label.length <= 512)
+          sanitized.push({ value: value, label: label })
+      }
+      ipcKeyboards = sanitized
+    } catch (error) {
+      ipcKeyboards = []
+    }
+  }
+
+  function fallbackInputStatusText() {
+    if (!catOn) return "Disabled"
+    if (!ipcStatusReady) return "Connecting to Bongo Cat…"
+    if (ipcStatus.presentationSuppressed === true) return "Hidden for screen privacy"
+    if (ipcStatus.input === "authorizing") return "Waiting for input authorization…"
+    if (ipcStatus.input === "scanning") return "Scanning keyboards…"
+    if (ipcStatus.input === "ready") {
+      var count = Math.max(0, Number(ipcStatus.keyboards) || 0)
+      return count + (count === 1 ? " keyboard active" : " keyboards active")
+    }
+    if (ipcStatus.input === "permission") return "Input access required"
+    if (ipcStatus.input === "no-device") return "No keyboard found"
+    return String(ipcStatus.accessError || fallbackError || "Input helper unavailable")
+  }
+
+  function fallbackMonitorOptions() {
+    var options = [{ value: "", label: "Primary monitor" }]
+    var screens = Quickshell.screens || []
+    for (var i = 0; i < screens.length; ++i) {
+      var name = String(screens[i].name || "")
+      if (name !== "") options.push({ value: name, label: name })
+    }
+    return options
+  }
+
+  function fallbackKeyboardOptions() {
+    var options = ipcKeyboards.slice()
+    var found = false
+    for (var i = 0; i < options.length; ++i)
+      if (String(options[i].value || "") === selectedKeyboard) found = true
+    if (!found && selectedKeyboard !== "")
+      options.push({ value: selectedKeyboard, label: selectedKeyboard + " · not found" })
+    return options
+  }
+
+  Process {
+    id: ipcAction
+    property bool refreshKeyboards: false
+    onExited: function(exitCode) { root.finishIpcAction(exitCode) }
+  }
+
+  Process {
+    id: ipcStatusQuery
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.takeStatus(text)
+    }
+    onExited: function(exitCode) { root.finishStatusRequest(exitCode) }
+  }
+
+  Process {
+    id: ipcKeyboardsQuery
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.takeKeyboards(text)
+    }
+  }
+
+  Timer {
+    id: statusRefreshTimer
+    interval: 100
+    repeat: false
+    onTriggered: root.requestStatus()
+  }
+
+  Timer {
+    id: keyboardRefreshTimer
+    interval: 350
+    repeat: false
+    onTriggered: root.requestKeyboards()
+  }
+
+  Timer {
+    interval: 500
+    repeat: true
+    running: root.opened && !root.serviceAvailable && root.ipcStatusReady
+      && (root.ipcStatus.input === "scanning"
+        || root.ipcStatus.input === "authorizing"
+        || root.ipcStatus.accessBusy === true)
+    onTriggered: root.requestStatus()
   }
 
   component PanelGlyphButton: Button {
@@ -246,16 +567,18 @@ Panel {
     fixedWidth: Style.bar.iconSlot
     labelVisible: false
     hasVisualContent: true
-    active: root.bongo && root.bongo.catActive
-    tooltipText: !root.bongo ? "Loading Bongo Cat…"
-      : root.bongo.catActive ? "Bongo Cat · " + root.bongo.inputStatusText()
+    active: root.catOn
+    tooltipText: root.catOn
+      ? "Bongo Cat · " + (root.serviceAvailable
+        ? root.bongo.inputStatusText() : root.fallbackInputStatusText())
       : "Bongo Cat is off"
 
     onPressed: function(buttonCode) {
-      if (!root.bongo) return
       if (buttonCode === Qt.RightButton) root.toggleActive()
-      else if (buttonCode === Qt.MiddleButton) root.bongo.testAnimation()
-      else root.toggle()
+      else if (buttonCode === Qt.MiddleButton) {
+        if (root.serviceAvailable) root.bongo.testAnimation()
+        else root.invokeIpc(["test"], false)
+      } else root.toggle()
     }
 
     OpticalGlyph {
@@ -265,9 +588,9 @@ Panel {
       text: "󰄛"
       fontFamily: root.fontFamily
       fontSize: Style.font.iconLarge
-      color: root.bongo && root.bongo.catColorized
+      color: root.serviceAvailable && root.bongo.catColorized
         ? root.bongo.catTint : root.foreground
-      opacity: root.bongo && root.bongo.catActive ? 1 : 0.38
+      opacity: root.catOn ? 1 : 0.38
     }
   }
 
@@ -295,13 +618,16 @@ Panel {
         root.moveFromPanel(dx * 10, dy * 10)
       }
       onTextKey: function(text) {
-        if (!root.bongo) return
-        if (text === "t" || text === "T") root.bongo.testAnimation()
-        else if (text === "p" || text === "P")
-          root.bongo.setPositionLocked(!root.bongo.positionLocked)
-        else if (text === "r" || text === "R") {
-          root.bongo.scanDevices()
-          root.bongo.updateInputProcess()
+        if (text === "t" || text === "T") {
+          if (root.serviceAvailable) root.bongo.testAnimation()
+          else root.invokeIpc(["test"], false)
+        } else if (text === "p" || text === "P") {
+          root.applyPositionLocked(!root.catLocked)
+        } else if (text === "r" || text === "R") {
+          if (root.serviceAvailable) {
+            root.bongo.scanDevices()
+            root.bongo.updateInputProcess()
+          } else root.invokeIpc(["rescan"], true)
         }
       }
 
@@ -329,10 +655,10 @@ Panel {
               width: 62
               height: 26
               anchors.verticalCenter: parent.verticalCenter
-              source: root.bongo ? root.bongo.idleSource
+              source: root.serviceAvailable ? root.bongo.idleSource
                 : Qt.resolvedUrl("assets/bongo-cat-both-up.png")
-              colorized: root.bongo ? root.bongo.catColorized : false
-              tint: root.bongo ? root.bongo.catTint : "white"
+              colorized: root.serviceAvailable ? root.bongo.catColorized : false
+              tint: root.serviceAvailable ? root.bongo.catTint : "white"
             }
 
             Column {
@@ -348,7 +674,8 @@ Panel {
                 font.bold: true
               }
               Text {
-                text: root.bongo ? root.bongo.inputStatusText() : "Loading…"
+                text: root.serviceAvailable
+                  ? root.bongo.inputStatusText() : root.fallbackInputStatusText()
                 color: Qt.darker(root.foreground, 1.25)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -370,8 +697,8 @@ Panel {
                 height: Style.spacing.controlHeight
                 glyph: "\uf011"
                 iconSize: Math.max(1, Style.font.iconLarge - 1)
-                tooltipText: root.bongo && root.bongo.catActive ? "Disable" : "Enable"
-                selected: root.bongo && root.bongo.catActive
+                tooltipText: root.catOn ? "Disable" : "Enable"
+                selected: root.catOn
                 glyphColor: selected
                   ? Style.selectedStateColor(foreground, accent) : root.dim
                 bordered: true
@@ -385,24 +712,21 @@ Panel {
                 id: lockButton
                 width: Style.spacing.controlHeight
                 height: Style.spacing.controlHeight
-                glyph: root.bongo && root.bongo.positionLocked ? "\uf023" : "\uf09c"
+                glyph: root.catLocked ? "\uf023" : "\uf09c"
                 iconSize: Math.max(1, Style.font.iconLarge - 1)
-                tooltipText: root.bongo && root.bongo.positionLocked
+                tooltipText: root.catLocked
                   ? "Locked · Click to unlock" : "Unlocked · Click to lock"
-                selected: root.bongo && root.bongo.positionLocked
+                selected: root.catLocked
                 glyphColor: selected
                   ? Style.selectedStateColor(foreground, accent) : root.accent
-                enabled: root.bongo && root.bongo.catActive
+                enabled: root.catOn
                 opacity: enabled ? 1 : 0.38
                 bordered: true
                 focusable: true
                 foreground: root.foreground
                 accent: root.accent
                 fontFamily: root.fontFamily
-                onClicked: {
-                  if (root.bongo)
-                    root.bongo.setPositionLocked(!root.bongo.positionLocked)
-                }
+                onClicked: root.applyPositionLocked(!root.catLocked)
               }
               PanelGlyphButton {
                 id: testButton
@@ -411,14 +735,17 @@ Panel {
                 glyph: "\uf0d0"
                 iconSize: Math.max(1, Style.font.iconLarge - 1)
                 tooltipText: "Test Animation (T)"
-                enabled: root.bongo && root.bongo.catActive
+                enabled: root.catOn
                 opacity: enabled ? 1 : 0.38
                 bordered: true
                 focusable: true
                 foreground: root.foreground
                 accent: root.accent
                 fontFamily: root.fontFamily
-                onClicked: root.bongo.testAnimation()
+                onClicked: {
+                  if (root.serviceAvailable) root.bongo.testAnimation()
+                  else root.invokeIpc(["test"], false)
+                }
               }
             }
           }
@@ -447,30 +774,26 @@ Panel {
               bordered: true
               focusable: true
               foreground: root.foreground
-              onClicked: if (root.bongo) root.bongo.resizeCat(-20)
+              onClicked: root.applyCatWidth(root.catSize - 20)
             }
             PanelSlider {
               width: Math.max(80, parent.width - 38 - sizeDownButton.width
                 - sizeUpButton.width - sizeValue.width - parent.spacing * 4)
               anchors.verticalCenter: parent.verticalCenter
               bar: root.bar
-              value: root.bongo ? root.bongo.catWidth : 280
-              minimum: root.bongo ? root.bongo.minimumCatWidth : 60
+              value: root.catSize
+              minimum: root.serviceAvailable ? root.bongo.minimumCatWidth : 60
               maximum: 640
               step: 20
               integer: true
-              onMoved: function(next) {
-                if (root.bongo) root.bongo.previewCatWidth(next)
-              }
-              onReleased: function(next) {
-                if (root.bongo) root.bongo.setCatWidth(next)
-              }
+              onMoved: function(next) { root.previewCatWidth(next) }
+              onReleased: function(next) { root.applyCatWidth(next) }
             }
             Text {
               id: sizeValue
               width: 52
               anchors.verticalCenter: parent.verticalCenter
-              text: (root.bongo ? root.bongo.catWidth : 280) + " px"
+              text: root.catSize + " px"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -485,7 +808,7 @@ Panel {
               bordered: true
               focusable: true
               foreground: root.foreground
-              onClicked: if (root.bongo) root.bongo.resizeCat(20)
+              onClicked: root.applyCatWidth(root.catSize + 20)
             }
           }
 
@@ -497,10 +820,8 @@ Panel {
               { value: "280", label: "Medium" },
               { value: "420", label: "Large" }
             ]
-            value: root.bongo ? String(root.bongo.catWidth) : "280"
-            onChanged: function(next) {
-              if (root.bongo) root.bongo.setCatWidth(parseInt(next, 10))
-            }
+            value: String(root.catSize)
+            onChanged: function(next) { root.applyCatWidth(parseInt(next, 10)) }
           }
 
           Item {
@@ -522,15 +843,13 @@ Panel {
                 { value: "theme", label: "Theme" },
                 { value: "hex", label: "Hex" }
               ]
-              value: root.bongo ? root.bongo.colorMode : "default"
-              onChanged: function(next) {
-                if (root.bongo) root.bongo.setColorMode(next)
-              }
+              value: root.catColorMode
+              onChanged: function(next) { root.applyColorMode(next) }
             }
           }
 
           Row {
-            visible: root.bongo && root.bongo.colorMode === "hex"
+            visible: root.catColorMode === "hex"
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(8)
 
@@ -538,14 +857,14 @@ Panel {
               width: 26
               height: 26
               radius: Style.cornerRadius
-              color: root.bongo ? root.bongo.customColor : "#f0abab"
+              color: root.catCustomColor
               border.width: 1
               border.color: root.foreground
             }
             TextField {
               id: hexField
               width: 130
-              text: root.bongo ? root.bongo.customColor : "#f0abab"
+              text: root.catCustomColor
               placeholderText: "#RRGGBB"
               foreground: root.foreground
               accent: root.accent
@@ -553,13 +872,10 @@ Panel {
               validator: RegularExpressionValidator {
                 regularExpression: /^#[0-9a-fA-F]{6}$/
               }
-              onTextEdited: if (root.bongo && acceptableInput)
-                root.bongo.setCustomColor(text)
-              onEditingFinished: if (root.bongo && acceptableInput)
-                root.bongo.setCustomColor(text)
+              onTextEdited: if (acceptableInput) root.applyCustomColor(text)
+              onEditingFinished: if (acceptableInput) root.applyCustomColor(text)
               onActiveFocusChanged: {
-                if (!activeFocus && !acceptableInput && root.bongo)
-                  text = root.bongo.customColor
+                if (!activeFocus && !acceptableInput) text = root.catCustomColor
               }
             }
           }
@@ -577,7 +893,7 @@ Panel {
             NumberField {
               id: positionXField
               width: (parent.width - parent.spacing) / 2
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.positionControlsReady
               label: ""
               value: root.positionXValue
               from: 0
@@ -589,7 +905,7 @@ Panel {
               accent: root.accent
               fontFamily: root.fontFamily
               onModified: function(next) {
-                if (root.bongo) root.bongo.setPosition(next, root.positionYValue)
+                root.applyPosition(next, root.positionYValue)
               }
 
               Text {
@@ -608,7 +924,7 @@ Panel {
             NumberField {
               id: positionYField
               width: (parent.width - parent.spacing) / 2
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.positionControlsReady
               label: ""
               value: root.positionYValue
               from: 0
@@ -620,7 +936,7 @@ Panel {
               accent: root.accent
               fontFamily: root.fontFamily
               onModified: function(next) {
-                if (root.bongo) root.bongo.setPosition(root.positionXValue, next)
+                root.applyPosition(root.positionXValue, next)
               }
 
               Text {
@@ -651,7 +967,7 @@ Panel {
               glyph: "\uf060"
               iconSize: Style.font.icon
               tooltipText: "10 px left"
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.positionControlsReady
               opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
@@ -666,7 +982,7 @@ Panel {
               glyph: "\uf062"
               iconSize: Style.font.icon
               tooltipText: "10 px up"
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.positionControlsReady
               opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
@@ -681,7 +997,7 @@ Panel {
               glyph: "\uf063"
               iconSize: Style.font.icon
               tooltipText: "10 px down"
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.positionControlsReady
               opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
@@ -696,7 +1012,7 @@ Panel {
               glyph: "\uf061"
               iconSize: Style.font.icon
               tooltipText: "10 px right"
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.positionControlsReady
               opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
@@ -709,14 +1025,20 @@ Panel {
               width: positionActions.controlWidth
               height: positionActions.controlHeight
               text: "Reset"
-              enabled: root.bongo && root.bongo.catActive
+              enabled: root.catOn
               opacity: enabled ? 1 : 0.38
               bordered: true
               focusable: true
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
-              onClicked: root.bongo.resetPosition()
+              onClicked: {
+                if (root.serviceAvailable) root.bongo.resetPosition()
+                else {
+                  root.ipcStatusReady = false
+                  root.persistFallback({ positionX: -1, positionY: -1 })
+                }
+              }
             }
           }
 
@@ -737,16 +1059,17 @@ Panel {
               NumberField {
                 width: parent.width
                 label: ""
-                value: root.bongo ? root.bongo.keypressDuration : 105
-                from: 40
-                to: 500
+                value: root.pawDuration
+                from: 10
+                to: 5000
                 stepSize: 5
                 fieldWidth: width
                 foreground: root.foreground
                 accent: root.accent
                 fontFamily: root.fontFamily
                 onModified: function(next) {
-                  if (root.bongo) root.bongo.setKeypressDuration(next)
+                  if (root.serviceAvailable) root.bongo.setKeypressDuration(next)
+                  else root.persistFallback({ keypressDuration: next })
                 }
               }
             }
@@ -765,13 +1088,15 @@ Panel {
                 width: parent.width
                 label: ""
                 showLabel: false
-                value: root.bongo ? root.bongo.monitorName : ""
-                options: root.bongo ? root.bongo.monitorOptions() : []
+                value: root.selectedMonitor
+                options: root.serviceAvailable
+                  ? root.bongo.monitorOptions() : root.fallbackMonitorOptions()
                 foreground: root.foreground
                 accent: root.accent
                 fontFamily: root.fontFamily
                 onChanged: function(next) {
-                  if (root.bongo) root.bongo.setMonitorName(next)
+                  if (root.serviceAvailable) root.bongo.setMonitorName(next)
+                  else root.persistFallback({ monitorName: String(next || "") })
                 }
               }
             }
@@ -798,14 +1123,17 @@ Panel {
                 width: workspaceChoices.allWidth
                 height: workspaceChoices.height
                 text: "All"
-                active: root.bongo && root.bongo.workspaceId === 0
+                active: root.selectedWorkspace === 0
                 bordered: true
                 focusable: true
                 foreground: root.foreground
                 background: root.background
                 accent: root.accent
                 fontFamily: root.fontFamily
-                onClicked: if (root.bongo) root.bongo.setWorkspaceId(0)
+                onClicked: {
+                  if (root.serviceAvailable) root.bongo.setWorkspaceId(0)
+                  else root.persistFallback({ workspaceId: 0 })
+                }
               }
 
               Repeater {
@@ -818,16 +1146,17 @@ Panel {
                   width: workspaceChoices.workspaceWidth
                   height: workspaceChoices.height
                   text: String(workspaceNumber)
-                  active: root.bongo
-                    && root.bongo.workspaceId === workspaceNumber
+                  active: root.selectedWorkspace === workspaceNumber
                   bordered: true
                   focusable: true
                   foreground: root.foreground
                   background: root.background
                   accent: root.accent
                   fontFamily: root.fontFamily
-                  onClicked: if (root.bongo)
-                    root.bongo.setWorkspaceId(workspaceNumber)
+                  onClicked: {
+                    if (root.serviceAvailable) root.bongo.setWorkspaceId(workspaceNumber)
+                    else root.persistFallback({ workspaceId: workspaceNumber })
+                  }
                 }
               }
             }
@@ -850,15 +1179,20 @@ Panel {
               id: inputRescanButton
               anchors.verticalCenter: parent.verticalCenter
               height: Style.spacing.controlHeight
-              text: root.bongo && root.bongo.deviceScanRunning ? "Scanning…" : "Rescan"
-              enabled: root.bongo && !root.bongo.deviceScanRunning
+              text: (root.serviceAvailable && root.bongo.deviceScanRunning)
+                || (!root.serviceAvailable && root.ipcStatus.input === "scanning")
+                ? "Scanning…" : "Rescan"
+              enabled: root.serviceAvailable
+                ? !root.bongo.deviceScanRunning : !ipcAction.running
               bordered: true
               focusable: true
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: {
-                root.bongo.scanDevices()
-                root.bongo.updateInputProcess()
+                if (root.serviceAvailable) {
+                  root.bongo.scanDevices()
+                  root.bongo.updateInputProcess()
+                } else root.invokeIpc(["rescan"], true)
               }
             }
           }
@@ -876,21 +1210,24 @@ Panel {
               width: parent.width
               label: ""
               showLabel: false
-              value: root.bongo ? root.bongo.keyboardName : ""
-              options: root.bongo ? root.bongo.keyboardOptions() : []
+              value: root.selectedKeyboard
+              options: root.serviceAvailable
+                ? root.bongo.keyboardOptions() : root.fallbackKeyboardOptions()
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
               onChanged: function(next) {
-                if (root.bongo) root.bongo.setKeyboardName(next)
+                if (root.serviceAvailable) root.bongo.setKeyboardName(next)
+                else root.persistFallback({ keyboardName: String(next || "") })
               }
             }
           }
 
           Text {
-            visible: root.bongo && root.bongo.accessError !== ""
+            visible: text !== ""
             width: parent.width
-            text: root.bongo ? root.bongo.accessError : ""
+            text: root.serviceAvailable ? root.bongo.accessError
+              : String(root.ipcStatus.accessError || root.fallbackError || "")
             color: root.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -898,36 +1235,52 @@ Panel {
           }
 
           Row {
-            visible: root.bongo && ((root.bongo.needsInputAccess
-              && !root.bongo.accessInstalled) || root.bongo.accessInstalled)
+            visible: root.serviceAvailable
+              ? ((root.bongo.needsInputAccess && !root.bongo.accessInstalled)
+                || root.bongo.accessInstalled)
+              : root.ipcStatusReady && ((root.ipcStatus.needsInputAccess === true
+                && root.ipcStatus.accessInstalled !== true)
+                || root.ipcStatus.accessInstalled === true)
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(8)
 
             Button {
-              visible: root.bongo && root.bongo.needsInputAccess
-                && !root.bongo.accessInstalled
+              visible: root.serviceAvailable
+                ? (root.bongo.needsInputAccess && !root.bongo.accessInstalled)
+                : (root.ipcStatus.needsInputAccess === true
+                  && root.ipcStatus.accessInstalled !== true)
               height: Style.spacing.controlHeight
-              text: root.bongo && root.bongo.accessBusy ? "Allowing…" : "Allow Input"
+              text: (root.serviceAvailable ? root.bongo.accessBusy
+                : root.ipcStatus.accessBusy === true) ? "Allowing…" : "Allow Input"
               tooltipText: "Session-only raw keyboard access; trusts user-owned plugin files"
-              enabled: root.bongo && !root.bongo.accessBusy
+              enabled: root.serviceAvailable
+                ? !root.bongo.accessBusy : root.ipcStatus.accessBusy !== true
               bordered: true
               focusable: true
               foreground: root.foreground
               accent: root.accent
               fontFamily: root.fontFamily
-              onClicked: root.bongo.setInputAccess(true)
+              onClicked: {
+                if (root.serviceAvailable) root.bongo.setInputAccess(true)
+                else root.invokeIpc(["allowInput"], false)
+              }
             }
             Button {
-              visible: root.bongo && root.bongo.accessInstalled
+              visible: root.serviceAvailable
+                ? root.bongo.accessInstalled : root.ipcStatus.accessInstalled === true
               height: Style.spacing.controlHeight
-              text: root.bongo && root.bongo.accessBusy ? "Cancel Input" : "Revoke Input"
+              text: (root.serviceAvailable ? root.bongo.accessBusy
+                : root.ipcStatus.accessBusy === true) ? "Cancel Input" : "Revoke Input"
               tooltipText: "Close the session keyboard descriptors"
-              enabled: root.bongo
+              enabled: true
               bordered: true
               focusable: true
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: root.bongo.setInputAccess(false)
+              onClicked: {
+                if (root.serviceAvailable) root.bongo.setInputAccess(false)
+                else root.invokeIpc(["revokeInput"], false)
+              }
             }
           }
         }

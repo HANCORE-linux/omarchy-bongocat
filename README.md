@@ -6,9 +6,16 @@ A lightweight native Quickshell plugin with no AUR package and no separate
 `wayland-bongocat` process. Quickshell renders the cat while the shipped local
 Python helper emits only `L` or `R` paw events.
 
+![Upstream-compatible paw animation states](animation-preview.png)
+
+The animation uses the four exact upstream frames. The red impact strokes are
+part of the left/right paw-down artwork; no extra ring or particle effect is
+layered on top. Normal presses use upstream's 100 ms default; a manual test uses
+one randomly selected paw for upstream's 200 ms test duration.
+
 ## Requirements
 
-- Omarchy Quattro with Quickshell
+- Omarchy 4.0.3 or newer with Quickshell
 - Python 3.10 or newer
 - Standard Omarchy packages and tools: Bash, jq, Polkit (`pkexec`), util-linux
   (`setpriv`), systemd (`udevadm`), GNU coreutils, GNU awk, GNU grep, and
@@ -42,7 +49,7 @@ privileged cleanup is required.
 
 - Left-click the bar icon to open the settings panel.
 - Right-click the bar icon to enable or disable Bongo Cat.
-- Middle-click the bar icon to test the animation.
+- Middle-click the bar icon to test one randomly selected paw animation.
 - Use the compact header buttons for enable, position lock, and animation test.
 - Unlock and drag the cat to reposition it.
 - While unlocked, use the mouse wheel to resize it and right-click to lock it.
@@ -77,6 +84,14 @@ The source-only Python helper runs directly from the plugin. Nothing is
 compiled, downloaded, or installed, and no prebuilt executable is bundled.
 Only the crash-recovery settings journal uses `$XDG_RUNTIME_DIR`; it is cleared
 automatically at logout.
+
+## Verification
+
+Run the focused QML tests with Qt 6:
+
+```bash
+./tests/run-tests -o -,txt
+```
 
 ## Credits
 
