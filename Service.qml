@@ -752,18 +752,17 @@ Item {
   Connections {
     target: root.shell
     ignoreUnknownSignals: true
-    function onBarConfigChanged() {
-      root.verifyPersistedSettings()
-      root.syncFromShell()
-      root.recoverPendingJournal()
-      root.writePendingJournal()
+    function synchronizeSettings(service) {
+      // Config signals can already be queued while a plugin instance is being
+      // destroyed during a shell reload. Do not dereference that dead context.
+      if (!service) return
+      service.verifyPersistedSettings()
+      service.syncFromShell()
+      service.recoverPendingJournal()
+      service.writePendingJournal()
     }
-    function onShellConfigChanged() {
-      root.verifyPersistedSettings()
-      root.syncFromShell()
-      root.recoverPendingJournal()
-      root.writePendingJournal()
-    }
+    function onBarConfigChanged() { synchronizeSettings(root) }
+    function onShellConfigChanged() { synchronizeSettings(root) }
   }
 
   Component.onCompleted: {

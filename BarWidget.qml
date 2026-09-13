@@ -348,13 +348,10 @@ Panel {
   }
 
   function fallbackKeyboardOptions() {
-    var options = ipcKeyboards.slice()
-    var found = false
-    for (var i = 0; i < options.length; ++i)
-      if (String(options[i].value || "") === selectedKeyboard) found = true
-    if (!found && selectedKeyboard !== "")
-      options.push({ value: selectedKeyboard, label: selectedKeyboard + " · not found" })
-    return options
+    // The service already includes a configured-but-missing keyboard. Keeping
+    // this function independent of selectedKeyboard avoids a value/options
+    // binding cycle in host-provided Dropdown implementations.
+    return ipcKeyboards.slice()
   }
 
   Process {
