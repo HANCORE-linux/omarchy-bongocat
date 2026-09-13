@@ -13,6 +13,7 @@ a523fef392b9b2d15adaf6b609e7461c521accc7e4ddf555d4c3b5600f15215b  assets/bongo-c
 62a32bbc1e9428c2ff7eb53913e414afef994e96853851c9f5f4bbc4d10bf55f  assets/bongo-cat-right-down.png
 EOF
 python3 tests/test_bongo_input.py
+python3 tests/test_qml_regressions.py
 
 export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen}
 qml_test_runner=${QML_TEST_RUNNER:-/usr/lib/qt6/bin/qmltestrunner}
