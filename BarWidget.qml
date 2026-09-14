@@ -14,9 +14,7 @@ Panel {
   ipcTarget: ""
   manageIpc: false
 
-  readonly property var bongo: bar && bar.shell
-    && typeof bar.shell.serviceFor === "function"
-    ? bar.shell.serviceFor(moduleName) : null
+  readonly property QtObject bongo: serviceResolver.service
   readonly property bool serviceAvailable: !!(bongo
     && typeof bongo.setCatWidth === "function")
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -71,8 +69,15 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  ServiceResolver {
+    id: serviceResolver
+    host: root.bar ? root.bar.shell : null
+    moduleName: root.moduleName
+  }
+
   onOpenedChanged: {
     if (opened) {
+      serviceResolver.scheduleSync()
       beginPanelSession()
       if (serviceAvailable) {
         bongo.checkInputAccess()
@@ -87,7 +92,10 @@ Panel {
     }
   }
 
-  onBongoChanged: if (opened) beginPanelSession()
+  onBongoChanged: {
+    if (panelSessionService && panelSessionService !== bongo) abandonPanelSession()
+    if (opened) beginPanelSession()
+  }
   onSettingsChanged: {
     localPatch = ({})
     if (opened && !serviceAvailable) requestStatus()
@@ -96,10 +104,14 @@ Panel {
   Component.onDestruction: abandonPanelSession()
 
   function fallbackSetting(key, fallback) {
+    // The inherited settings binding can initialize lazily and emit
+    // settingsChanged, whose handler resets localPatch. Read it before tracking
+    // localPatch so that initialization cannot re-enter this caller's binding.
+    var hostSettings = settings
     if (localPatch && localPatch[key] !== undefined && localPatch[key] !== null)
       return localPatch[key]
-    if (settings && settings[key] !== undefined && settings[key] !== null)
-      return settings[key]
+    if (hostSettings && hostSettings[key] !== undefined && hostSettings[key] !== null)
+      return hostSettings[key]
     return fallback
   }
 

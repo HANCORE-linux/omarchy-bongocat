@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Exercise the real widget and installed stock-bar APIs without showing windows."""
+
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+REPO = Path(__file__).resolve().parent.parent
+SHELL = Path(os.environ.get("OMARCHY_PATH", "/usr/share/omarchy")) / "shell"
+
+
+def main() -> int:
+    display = os.environ.get("WAYLAND_DISPLAY")
+    if not display:
+        raise SystemExit("The widget integration test requires a Wayland session")
+    if not display.startswith("/"):
+        display = str(Path(os.environ["XDG_RUNTIME_DIR"]) / display)
+    for resource in ("Commons", "Ui", "services"):
+        if not (SHELL / resource).is_dir():
+            raise SystemExit(f"Omarchy shell component directory not found: {SHELL / resource}")
+
+    with tempfile.TemporaryDirectory(prefix="bongo-widget-") as directory:
+        root = Path(directory)
+        for resource in ("Commons", "Ui", "services"):
+            (root / resource).symlink_to(SHELL / resource, target_is_directory=True)
+        plugin = root / "Bongo"
+        plugin.mkdir()
+        for source in REPO.iterdir():
+            if source.suffix in (".qml", ".js") or source.name == "assets":
+                (plugin / source.name).symlink_to(source)
+        (root / "shell.qml").write_text(
+            (REPO / "tests/integration/widget.qml.in").read_text()
+        )
+        runtime = root / "runtime"
+        runtime.mkdir(mode=0o700)
+        # Isolate IPC and state; only the existing Wayland connection is used.
+        # The fixture prevents every widget panel from mapping a window.
+        env = dict(
+            os.environ,
+            QT_QPA_PLATFORM="wayland",
+            QT_QPA_PLATFORMTHEME="basic",
+            QT_STYLE_OVERRIDE="Fusion",
+            XDG_RUNTIME_DIR=str(runtime),
+            WAYLAND_DISPLAY=display,
+            HYPRLAND_INSTANCE_SIGNATURE="",
+        )
+        result = subprocess.run(
+            ["quickshell", "-p", str(root / "shell.qml"), "--no-color"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=20,
+        )
+        print(result.stdout, end="")
+        return int(
+            result.returncode != 0
+            or "INTEGRATION_PASS:" not in result.stdout
+            or "WARN" in result.stdout
+            or "ERROR" in result.stdout
+        )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

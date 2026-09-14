@@ -1,0 +1,156 @@
+import QtQuick
+import Quickshell
+import qs.Ui
+import "services" as Host
+import "Bongo" as Bongo
+
+ShellRoot {
+  id: test
+  property QtObject widget: null
+  property QtObject first: null
+  property QtObject second: null
+  property var services: ({})
+  property int lookups: 0
+  property int step: 0
+  property bool failed: false
+
+  function check(ok, message) {
+    if (ok) return true
+    failed = true
+    console.error("INTEGRATION_FAIL: " + message)
+    steps.stop()
+    Qt.quit()
+    return false
+  }
+
+  Component {
+    id: serviceComponent
+    QtObject {
+      property string keyboardName: "keyboard-a"
+      property string monitorName: ""
+      property int workspaceId: 0
+      property int catWidth: 280
+      property int catHeight: 117
+      property int minimumCatWidth: 60
+      property int keypressDuration: 100
+      property bool catActive: false
+      property bool positionLocked: true
+      property bool presentationSuppressed: false
+      property bool catColorized: false
+      property color catTint: "white"
+      property string colorMode: "default"
+      property string customColor: "#f0abab"
+      property url idleSource: Qt.resolvedUrl("Bongo/assets/bongo-cat-both-up.png")
+      property bool accessBusy: false
+      property bool accessInstalled: false
+      property bool deviceScanRunning: false
+      property bool needsInputAccess: false
+      property string accessError: ""
+      property int sessions: 0
+      property int abandoned: 0
+      property int ended: 0
+      function targetScreen() { return null }
+      function inputStatusText() { return "off" }
+      function keyboardOptions() { return [{ value: keyboardName, label: keyboardName }] }
+      function monitorOptions() { return [{ value: "", label: "Primary monitor" }] }
+      function setCatWidth(value) { catWidth = value }
+      function checkInputAccess() {}
+      function scanDevices() {}
+      function beginPanelSession() { sessions += 1 }
+      function endPanelSession() { sessions -= 1; ended += 1 }
+      function abandonPanelSession() { sessions -= 1; abandoned += 1 }
+    }
+  }
+
+  Host.PluginShellApi {
+    id: stockShell
+    pluginId: "hancore.bongocat"
+    _serviceLookup: function(id) {
+      test.lookups += 1
+      if (!test.services[id]) {
+        test.first = serviceComponent.createObject(test)
+        test.services = { "hancore.bongocat": test.first }
+      }
+      return test.services[id]
+    }
+  }
+
+  Host.PluginShellApi {
+    id: fallbackShell
+    pluginId: "hancore.bongocat"
+  }
+
+  PluginBarApi {
+    id: stockBar
+    pluginId: "hancore.bongocat"
+    moduleName: "hancore.bongocat"
+    shell: stockShell
+    foreground: "#ffffff"
+    background: "#111111"
+    urgent: "#ff0000"
+    fontFamily: "sans-serif"
+    barSize: 32
+  }
+
+  Item { id: widgetParent }
+  Component { id: widgetComponent; Bongo.BarWidget {} }
+
+  Timer {
+    id: steps
+    interval: 80
+    running: true
+    repeat: true
+    onTriggered: {
+      if (test.failed) return
+      switch (test.step++) {
+      case 0:
+        test.widget = widgetComponent.createObject(widgetParent)
+        if (!test.check(!!test.widget, "widget loads")) return
+        // Exercise the real panel/controller without mapping a desktop window.
+        for (var i = 0; i < test.widget.data.length; i++) {
+          var child = test.widget.data[i]
+          if (typeof child.fittedContentWidth === "function") child.visible = false
+        }
+        test.widget.bar = stockBar
+        if (!test.check(test.lookups === 0, "lookup was synchronous during bar injection")) return
+        break
+      case 1:
+        if (!test.check(test.widget.bongo === test.first, "stock service resolves")) return
+        test.first.keyboardName = "keyboard-b"
+        if (!test.check(test.widget.selectedKeyboard === "keyboard-b", "keyboard binding remains reactive")) return
+        test.widget.open()
+        if (!test.check(test.first.sessions === 1, "panel session starts")) return
+        break
+      case 2:
+        test.second = serviceComponent.createObject(test)
+        stockShell.barConfig = { reload: true }
+        test.services = { "hancore.bongocat": test.second }
+        break
+      case 3:
+        if (!test.check(test.widget.bongo === test.second, "service replaced after config reload")) return
+        if (!test.check(test.first.sessions === 0 && test.first.abandoned === 1, "old panel session released")) return
+        if (!test.check(test.second.sessions === 1, "replacement panel session starts")) return
+        test.widget.close()
+        if (!test.check(test.second.sessions === 0 && test.second.ended === 1, "panel close releases replacement")) return
+        stockBar.shell = fallbackShell
+        break
+      case 4:
+        if (!test.check(!test.widget.serviceAvailable, "scoped bar without service keeps fallback")) return
+        test.widget.settings = { keyboardName: "fallback-keyboard" }
+        if (!test.check(test.widget.selectedKeyboard === "fallback-keyboard", "fallback settings remain reactive")) return
+        stockBar.shell = stockShell
+        break
+      case 5:
+        if (!test.check(test.widget.bongo === test.second, "stock service reconnects")) return
+        test.widget.open()
+        test.widget.destroy()
+        break
+      case 6:
+        if (!test.check(test.second.sessions === 0 && test.second.abandoned === 1, "destroy releases panel session")) return
+        console.log("INTEGRATION_PASS: stock Omarchy 4.0.3 facade, reactive keyboard, reload, panel sessions, fallback, destroy")
+        steps.stop()
+        Qt.quit()
+      }
+    }
+  }
+}

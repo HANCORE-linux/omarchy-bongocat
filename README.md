@@ -93,6 +93,17 @@ Run the focused QML tests with Qt 6:
 ./tests/run-tests -o -,txt
 ```
 
+With Omarchy installed, run the widget integration test inside a Wayland session:
+
+```bash
+python3 tests/run-widget-test
+```
+
+It uses the installed stock-bar API components to check deferred service lookup,
+reactive settings, service replacement, panel-session cleanup, and the IPC
+fallback's settings path. Its panels stay hidden and its IPC/state directory is
+temporary. QML warnings fail the test.
+
 ## Credits
 
 The animation frames and paw mapping are derived from
